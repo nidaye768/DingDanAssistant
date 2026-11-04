@@ -2,6 +2,7 @@ package com.dingdan.assistant
 
 import android.Manifest
 import android.content.pm.PackageManager
+import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.os.Bundle
@@ -109,6 +110,7 @@ class MainActivity : ComponentActivity() {
         }
         body.addView(preview, LinearLayout.LayoutParams(-1, dp(210)))
         body.addView(actionButton("拍摄并识别订单画面", accent) { captureAndRecognize() })
+        body.addView(actionButton("打开图片导入测试工作台", 0xFF246B8E.toInt()) { startActivity(Intent(this, ImageTestActivity::class.java)) })
 
         body.addView(section("验收中心", ink))
         body.addView(text("本机自检覆盖：单价公式、保守决策、哈希差异、文本归一化。真实识别率和提醒准确率需用标注订单/视频验收。", 12f, muted))

@@ -34,3 +34,12 @@ https://github.com/nidaye768/DingDanAssistant/releases/download/latest/DingDanAs
 
 ## 安全
 只做监测、分析和提醒，不自动抢单、不模拟点击货拉拉。测试请停车后进行。
+
+
+## V1.3 Demo 图片识别测试工作台
+- 首页新增图片导入入口，使用 Android 系统图片选择器，不申请整库照片权限。
+- 支持整图红色标题栏自动分割、最多前8张卡片识别；未检出卡片时回退整图 OCR。
+- 支持手动拖动框选单张订单卡片，作为自动分割的对照测试。
+- 自动分割和手动框选共用 ML Kit 中文 OCR、OpenAI 兼容视觉模型分析及本地测试记录流程。
+- 每次测试保存原图、识别目标图和 report.txt 到应用私有 files/test_records 目录，界面显示最近10次记录。
+- 当前仅为识别测试工具；车辆匹配、地图道路里程、动态策略和完整 recommend/pending/ignore 决策仍未完成。
