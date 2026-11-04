@@ -13,6 +13,7 @@ import android.provider.DocumentsContract
 import android.view.MotionEvent
 import android.view.View
 import android.widget.*
+import androidx.appcompat.app.AlertDialog
 import androidx.activity.ComponentActivity
 import androidx.activity.result.contract.ActivityResultContracts
 import kotlinx.coroutines.*
@@ -39,6 +40,7 @@ class YoloTrainingActivity : ComponentActivity() {
     private lateinit var saveNextButton: Button
     private lateinit var helpText: TextView
     private val rootDir by lazy { File(filesDir, "yolo_dataset") }
+    private val sourceMapDir by lazy { File(rootDir, "source_map").apply { mkdirs() } }
     private val imageQueue = mutableListOf<Uri>()
     private var currentIndex = -1
     private var currentSourceName = "image"
@@ -113,6 +115,12 @@ class YoloTrainingActivity : ComponentActivity() {
             canvasView.undo()
             status.text = "已撤销最后一个标注框"
         })
+        body.addView(button("清空当前图片全部标注框") {
+            canvasView.clearBoxes()
+            status.text = "当前图片标注框已清空；尚未保存的数据不会受影响"
+        })
+        body.addView(button("删除当前图片已保存的样本") { deleteCurrentSample() })
+        body.addView(button("批量删除已保存的错误样本") { showBatchDeleteDialog() })
         saveButton = button("只保存当前图片标注") { saveCurrent(false) }
         saveButton.isEnabled = false
         body.addView(saveButton)
@@ -258,9 +266,20 @@ class YoloTrainingActivity : ComponentActivity() {
         scope.launch {
             try {
                 val result = withContext(Dispatchers.IO) {
-                    val count = countSamples()
-                    val split = when (count % 10) { 8 -> "val"; 9 -> "test"; else -> "train" }
-                    val id = "order_${System.currentTimeMillis()}"
+                    val sourceKey = sourceKey(imageQueue[currentIndex])
+                    val mapping = File(sourceMapDir, "$sourceKey.txt")
+                    val existing = if (mapping.exists()) mapping.readText(Charsets.UTF_8).trim().split("|") else emptyList()
+                    val split: String
+                    val id: String
+                    if (existing.size == 2 && existing[0] in listOf("train", "val", "test")) {
+                        split = existing[0]
+                        id = existing[1]
+                    } else {
+                        val count = countSamples()
+                        split = when (count % 10) { 8 -> "val"; 9 -> "test"; else -> "train" }
+                        id = "order_${System.currentTimeMillis()}"
+                        mapping.writeText("$split|$id", Charsets.UTF_8)
+                    }
                     val imageDir = File(rootDir, "images/$split").apply { mkdirs() }
                     val labelDir = File(rootDir, "labels/$split").apply { mkdirs() }
                     val imageFile = File(imageDir, "$id.jpg")
@@ -291,6 +310,92 @@ class YoloTrainingActivity : ComponentActivity() {
                 saveNextButton.isEnabled = true
             }
         }
+    }
+
+
+    private fun sourceKey(uri: Uri): String {
+        val bytes = java.security.MessageDigest.getInstance("SHA-256")
+            .digest(uri.toString().toByteArray(Charsets.UTF_8))
+        return bytes.joinToString("") { "%02x".format(it) }
+    }
+
+    private fun sampleFiles(): List<File> =
+        listOf("train", "val", "test").flatMap { split ->
+            File(rootDir, "images/$split").listFiles()
+                ?.filter { it.isFile && it.extension.equals("jpg", true) }
+                ?.sortedBy { it.name } ?: emptyList()
+        }
+
+    private fun deleteSample(imageFile: File): Boolean {
+        val split = imageFile.parentFile?.name ?: return false
+        val id = imageFile.nameWithoutExtension
+        val labelFile = File(rootDir, "labels/$split/$id.txt")
+        val imageDeleted = !imageFile.exists() || imageFile.delete()
+        val labelDeleted = !labelFile.exists() || labelFile.delete()
+        if (imageDeleted && labelDeleted) {
+            sourceMapDir.listFiles()?.forEach { map ->
+                if (runCatching { map.readText(Charsets.UTF_8).trim() == "$split|$id" }.getOrDefault(false)) {
+                    map.delete()
+                }
+            }
+            return true
+        }
+        return false
+    }
+
+    private fun deleteCurrentSample() {
+        if (currentIndex !in imageQueue.indices) {
+            status.text = "请先打开一张图片"
+            return
+        }
+        val key = sourceKey(imageQueue[currentIndex])
+        val mapping = File(sourceMapDir, "$key.txt")
+        if (!mapping.exists()) {
+            status.text = "当前图片还没有已保存的样本，无需删除"
+            return
+        }
+        val parts = mapping.readText(Charsets.UTF_8).trim().split("|")
+        if (parts.size != 2) {
+            status.text = "样本索引异常，未执行删除"
+            return
+        }
+        val imageFile = File(rootDir, "images/\${parts[0]}/\${parts[1]}.jpg")
+        AlertDialog.Builder(this)
+            .setTitle("删除当前图片样本？")
+            .setMessage("将同时删除这张图片和对应的 YOLO 标注文件，不能撤销。")
+            .setNegativeButton("取消", null)
+            .setPositiveButton("删除") { _, _ ->
+                val ok = deleteSample(imageFile)
+                status.text = if (ok) "当前图片已保存样本删除成功" else "删除失败，请检查文件权限"
+                refreshStats()
+            }.show()
+    }
+
+    private fun showBatchDeleteDialog() {
+        val files = sampleFiles()
+        if (files.isEmpty()) {
+            status.text = "数据集中没有已保存样本"
+            return
+        }
+        val names = files.map { file ->
+            val split = file.parentFile?.name ?: ""
+            "\${file.nameWithoutExtension}（$split）"
+        }.toTypedArray()
+        val checked = BooleanArray(files.size)
+        AlertDialog.Builder(this)
+            .setTitle("选择要删除的错误样本")
+            .setMultiChoiceItems(names, checked) { _, which, isChecked -> checked[which] = isChecked }
+            .setNegativeButton("取消", null)
+            .setPositiveButton("删除所选") { _, _ ->
+                val selected = files.indices.filter { checked[it] }
+                if (selected.isEmpty()) {
+                    status.text = "未选择样本"
+                } else {
+                    val deleted = selected.count { deleteSample(files[it]) }
+                    status.text = "已删除 \${deleted}/\${selected.size} 个样本（图片及对应标签）"
+                    refreshStats()
+                }
+            }.show()
     }
 
     private fun countSamples(): Int =
