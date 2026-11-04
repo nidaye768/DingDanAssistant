@@ -11,8 +11,8 @@ android {
         applicationId = "com.dingdan.assistant"
         minSdk = 26
         targetSdk = 35
-        versionCode = 14
-        versionName = "1.3.2-demo"
+        versionCode = 15
+        versionName = "1.3.3-demo"
     }
 
     compileOptions {
