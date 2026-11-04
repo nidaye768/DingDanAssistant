@@ -98,7 +98,7 @@ class ImageTestActivity : ComponentActivity() {
         body.addView(preview, LinearLayout.LayoutParams(-1, dp(300)))
         body.addView(makeLabel("点击开始框选，然后在图片上拖动圈出一张订单卡片。", 12f))
         beginCrop = button("开始手动框选", 0xFF246B8E.toInt()) {
-            if (source == null || busy) status.text = "请先选择图片" else {
+            if (source == null || busy) { status.text = "请先选择图片" } else {
                 preview.beginSelection(); status.text = "请拖动框选一张订单卡片"
             }
         }
@@ -149,7 +149,7 @@ class ImageTestActivity : ComponentActivity() {
     }
 
     private fun autoSegment(bitmap: Bitmap) {
-        setBusy(true); status.text = "正在检测红色标题栏并分割…"
+        status.text = "正在检测红色标题栏并分割…"
         scope.launch {
             try {
                 val result = withContext(Dispatchers.Default) {
