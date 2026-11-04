@@ -288,6 +288,14 @@ class ImageTestActivity : ComponentActivity() {
 }
 
 private class CropSelectionView(context: android.content.Context) : View(context) {
+    init {
+        // Make this custom View an active touch target and stop the parent ScrollView
+        // from stealing the vertical drag used to draw a crop rectangle.
+        isClickable = true
+        isFocusable = true
+        isFocusableInTouchMode = true
+    }
+
     private val imagePaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
     private val borderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = 0xFFFF5722.toInt(); style = Paint.Style.STROKE
@@ -316,24 +324,47 @@ private class CropSelectionView(context: android.content.Context) : View(context
     }
 
     override fun onTouchEvent(e: MotionEvent): Boolean {
-        if (!selecting || bitmap == null) return false
-        when (e.action) {
+        if (!selecting || bitmap == null) return super.onTouchEvent(e)
+        when (e.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
+                // ScrollView otherwise intercepts a vertical finger movement.
+                parent?.requestDisallowInterceptTouchEvent(true)
+                if (imageRect.isEmpty) invalidate()
+                if (!imageRect.contains(e.x, e.y)) return true
                 startX = e.x.coerceIn(imageRect.left, imageRect.right)
                 startY = e.y.coerceIn(imageRect.top, imageRect.bottom)
-                selection.set(startX, startY, startX, startY); invalidate(); return true
+                selection.set(startX, startY, startX, startY)
+                invalidate()
+                return true
             }
-            MotionEvent.ACTION_MOVE, MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                selection.set(
-                    minOf(startX, e.x).coerceIn(imageRect.left, imageRect.right),
-                    minOf(startY, e.y).coerceIn(imageRect.top, imageRect.bottom),
-                    maxOf(startX, e.x).coerceIn(imageRect.left, imageRect.right),
-                    maxOf(startY, e.y).coerceIn(imageRect.top, imageRect.bottom)
-                )
-                if (e.action != MotionEvent.ACTION_MOVE) selecting = false
-                invalidate(); return true
+            MotionEvent.ACTION_MOVE -> {
+                updateSelection(e.x, e.y)
+                return true
+            }
+            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                updateSelection(e.x, e.y)
+                selecting = false
+                parent?.requestDisallowInterceptTouchEvent(false)
+                invalidate()
+                performClick()
+                return true
             }
         }
+        return true
+    }
+
+    private fun updateSelection(x: Float, y: Float) {
+        selection.set(
+            minOf(startX, x).coerceIn(imageRect.left, imageRect.right),
+            minOf(startY, y).coerceIn(imageRect.top, imageRect.bottom),
+            maxOf(startX, x).coerceIn(imageRect.left, imageRect.right),
+            maxOf(startY, y).coerceIn(imageRect.top, imageRect.bottom)
+        )
+        invalidate()
+    }
+
+    override fun performClick(): Boolean {
+        super.performClick()
         return true
     }
 
