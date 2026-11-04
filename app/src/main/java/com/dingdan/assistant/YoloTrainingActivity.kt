@@ -78,6 +78,12 @@ class YoloTrainingActivity : ComponentActivity() {
             listOf("完整订单卡片（class 0）", "部分露出订单卡片（class 1）"))
         body.addView(classSpinner)
         canvasView = AnnotationView(this)
+        classSpinner.onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {
+            override fun onNothingSelected(parent: android.widget.AdapterView<*>?) {}
+            override fun onItemSelected(parent: android.widget.AdapterView<*>?, view: View?, position: Int, id: Long) {
+                canvasView.setClassId(position)
+            }
+        }
         canvasView.setBackgroundColor(0xFF202830.toInt())
         body.addView(canvasView, LinearLayout.LayoutParams(-1, dp(360)))
         body.addView(label("操作：在图片上按住并拖动，框出一张订单卡片；一张图可以画多个框。", 12f))
@@ -130,7 +136,7 @@ class YoloTrainingActivity : ComponentActivity() {
             try {
                 val result = withContext(Dispatchers.IO) {
                     val count = countSamples()
-                    val split = when (count % 10) { 8, 9 -> "test"; 7 -> "val"; else -> "train" }
+                    val split = when (count % 10) { 8 -> "val"; 9 -> "test"; else -> "train" }
                     val id = "order_${System.currentTimeMillis()}"
                     val imageDir = File(rootDir, "images/$split").apply { mkdirs() }
                     val labelDir = File(rootDir, "labels/$split").apply { mkdirs() }
@@ -214,6 +220,8 @@ private data class YoloBox(
 }
 
 private class AnnotationView(context: android.content.Context) : View(context) {
+    init { isClickable = true; isFocusable = true }
+
     private val imagePaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
     private val boxPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = 0xFF00C853.toInt(); style = Paint.Style.STROKE
