@@ -1,0 +1,110 @@
+name: Build APK
+
+on:
+  push:
+    branches: [ main ]
+    tags: [ 'v*' ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      # 固定签名钥匙：缓存复用，保证每次产物签名一致，可覆盖安装
+      - name: Restore signing keystore
+        id: keystore
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ github.workspace }}/.signing/debug.keystore
+          key: dingdan-signing-v1
+
+      - name: Create signing keystore if missing
+        run: |
+          KS="${{ github.workspace }}/.signing/debug.keystore"
+          mkdir -p "$(dirname "$KS")"
+          if [ ! -f "$KS" ]; then
+            keytool -genkeypair -v \
+              -keystore "$KS" \
+              -storepass android -keypass android \
+              -alias androiddebugkey \
+              -dname "CN=Android Debug,O=Android,C=US" \
+              -keyalg RSA -keysize 2048 -validity 10000
+          fi
+          keytool -list -keystore "$KS" -storepass android | tail -3
+
+      - name: Build APK
+        env:
+          SIGNING_STORE_FILE: ${{ github.workspace }}/.signing/debug.keystore
+        run: |
+          gradle assembleDebug --no-daemon --stacktrace \
+            -Pandroid.injected.signing.store.file="$SIGNING_STORE_FILE" \
+            -Pandroid.injected.signing.store.password=android \
+            -Pandroid.injected.signing.key.alias=androiddebugkey \
+            -Pandroid.injected.signing.key.password=android
+
+      - name: Save signing keystore
+        if: steps.keystore.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ github.workspace }}/.signing/debug.keystore
+          key: dingdan-signing-v1
+
+      - name: Rename APK
+        id: rename
+        run: |
+          SRC="app/build/outputs/apk/debug/app-debug.apk"
+          VERSION=$(grep -oP 'versionName\s*=\s*"\K[^"]+' app/build.gradle.kts)
+          DST="app/build/outputs/apk/debug/DingDanAssistant-${VERSION}.apk"
+          cp "$SRC" "$DST"
+          echo "apk=$DST" >> "$GITHUB_OUTPUT"
+          ls -la "$DST"
+
+      - name: Print APK signature
+        run: |
+          APK="${{ steps.rename.outputs.apk }}"
+          BT=$(ls -d "$ANDROID_HOME"/build-tools/* 2>/dev/null | tail -1)
+          "$BT/apksigner" verify --print-certs "$APK" | grep -i 'SHA-256' || true
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: DingDanAssistant-apk
+          path: ${{ steps.rename.outputs.apk }}
+
+      # 固定下载地址：releases/download/latest/DingDanAssistant.apk
+      - name: Publish to release
+        if: startsWith(github.ref, 'refs/heads/') || startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          APK: ${{ steps.rename.outputs.apk }}
+          RUN: ${{ github.run_number }}
+          SHA: ${{ github.sha }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          cp "$APK" DingDanAssistant.apk
+          if ! gh release view latest --repo "$REPO" >/dev/null 2>&1; then
+            gh release create latest --repo "$REPO" \
+              --title "DingDanAssistant 最新构建" \
+              --notes "每次构建自动更新。" || true
+          fi
+          gh release delete-asset latest DingDanAssistant.apk --repo "$REPO" -y || true
+          gh release upload latest DingDanAssistant.apk --repo "$REPO" --clobber
+          gh release edit latest --repo "$REPO" \
+            --notes "构建 m${RUN} · $SHA · 每次构建自动更新。"
