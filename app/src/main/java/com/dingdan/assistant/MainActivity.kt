@@ -4,10 +4,8 @@ import android.Manifest
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
-import android.graphics.Rect
 import android.os.Bundle
 import android.util.Base64
-import android.view.Gravity
 import android.view.ViewGroup
 import android.widget.*
 import androidx.activity.ComponentActivity
@@ -16,8 +14,8 @@ import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import com.dingdan.assistant.vision.OrderCardSegmenter
 import com.google.mlkit.vision.common.InputImage
-import com.google.mlkit.vision.text.Text
 import com.google.mlkit.vision.text.TextRecognition
 import com.google.mlkit.vision.text.chinese.ChineseTextRecognizerOptions
 import kotlinx.coroutines.*
@@ -176,20 +174,38 @@ class MainActivity : ComponentActivity() {
                 val recognizer = TextRecognition.getClient(
                     ChineseTextRecognizerOptions.Builder().build()
                 )
+                // V1.1: 先用红色标题栏把整屏切成单张订单卡片，OCR 与上传都以卡片为单位。
+                val segmentation = OrderCardSegmenter.process(bitmap)
+                val cards = segmentation.cards
                 recognizer.process(InputImage.fromBitmap(bitmap, 0))
                     .addOnSuccessListener { text ->
-                        val cards = splitIntoCards(bitmap, text)
                         val plainText = text.text
+                        val cardLines = if (cards.isEmpty()) {
+                            "未切出完整卡片：${segmentation.reason}"
+                        } else {
+                            cards.mapIndexed { i, card ->
+                                val tag = when {
+                                    card.isPartialBottom -> "（底部截断，需滚动后重拍）"
+                                    card.isPartialTop -> "（顶部截断）"
+                                    else -> ""
+                                }
+                                "卡片 ${i + 1}$tag  hash=${"%016x".format(card.perceptualHash)}" +
+                                    "  占屏 ${"%.1f".format(card.topInScreen * 100)}%-" +
+                                    "${"%.1f".format(card.bottomInScreen * 100)}%"
+                            }.joinToString("\n")
+                        }
                         runOnUiThread {
-                            resultView.text = "OCR 原文：\n$plainText\n\n检测到候选订单卡片：${cards.size}"
+                            resultView.text = buildString {
+                                appendLine("OCR 原文：")
+                                appendLine(plainText)
+                                appendLine()
+                                appendLine("红条切割：检测到 ${segmentation.headerBands.size} 条红色标题栏，" +
+                                    "切出 ${cards.size} 张卡片（${segmentation.reason}）")
+                                append(cardLines)
+                            }
                             status.text = "本地识别完成，准备调用大模型……"
                         }
-                        if (cards.isEmpty()) {
-                            uploadForAnalysis(bitmap, plainText, 0)
-                        } else {
-                            // V1 alpha: send full screenshot once; model can reason across card layout.
-                            uploadForAnalysis(bitmap, plainText, cards.size)
-                        }
+                        uploadForAnalysis(bitmap, plainText, cards.size)
                     }
                     .addOnFailureListener { e ->
                         runOnUiThread { status.text = "OCR 失败：${e.localizedMessage}" }
@@ -201,29 +217,7 @@ class MainActivity : ComponentActivity() {
         })
     }
 
-    // Group OCR text blocks into vertical card-like regions. This is a first-pass
-    // heuristic; user-adjustable ROI and robust card boundaries are planned next.
-    private fun splitIntoCards(bitmap: Bitmap, result: Text): List<Rect> {
-        val boxes = result.textBlocks.mapNotNull { it.boundingBox }
-            .sortedBy { it.top }
-        if (boxes.isEmpty()) return emptyList()
-        val groups = mutableListOf<MutableList<Rect>>()
-        for (box in boxes) {
-            val current = groups.lastOrNull()
-            if (current == null || box.top - current.maxOf { it.bottom } > bitmap.height * 0.055f) {
-                groups.add(mutableListOf(box))
-            } else current.add(box)
-        }
-        return groups.filter { it.size >= 2 }.map { group ->
-            Rect(
-                group.minOf { it.left }.coerceAtLeast(0),
-                (group.minOf { it.top } - 18).coerceAtLeast(0),
-                (group.maxOf { it.right } + 18).coerceAtMost(bitmap.width),
-                (group.maxOf { it.bottom } + 18).coerceAtMost(bitmap.height)
-            )
-        }
-    }
-
+    // V1.1 卡片边界改由 OrderCardSegmenter 的红条锚点决定，旧的 OCR 行距启发式已移除。
     private fun uploadForAnalysis(bitmap: Bitmap, ocr: String, cardCount: Int) {
         val base = apiBase.text.toString().trim().trimEnd('/')
         val key = apiKey.text.toString().trim()
