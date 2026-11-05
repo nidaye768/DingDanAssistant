@@ -301,8 +301,8 @@ class OcrDiagnosticActivity : ComponentActivity() {
                 var mlOriginalText = ""
                 var ppFare: Double? = null
                 var mlFare: Double? = null
-                engineResults.forEach { rawEntry ->
-                    val item = rawEntry as? JSONObject ?: return@forEach
+                for (engineIndex in 0 until engineResults.length()) {
+                    val item = engineResults.optJSONObject(engineIndex) ?: continue
                     val variant = item.optString("variant", "unknown")
                     val pp = item.optJSONObject("pp_ocr")
                     val ml = item.optJSONObject("ml_kit")
