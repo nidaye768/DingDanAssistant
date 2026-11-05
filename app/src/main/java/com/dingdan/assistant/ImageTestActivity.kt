@@ -257,7 +257,13 @@ class ImageTestActivity : ComponentActivity() {
                 report.appendLine("时间：" + formatTime(started))
                 if (note.isNotBlank()) report.appendLine(note)
                 try {
-                    check(OpenCVUtils.init(this@ImageTestActivity)) { "OpenCV 原生库初始化失败" }
+                    // Load the native library directly first so Android's real linker error is preserved.
+                    try {
+                        System.loadLibrary("opencv_java4")
+                    } catch (e: UnsatisfiedLinkError) {
+                        throw IllegalStateException("加载 opencv_java4 失败：" + (e.message ?: "未知原生库错误"), e)
+                    }
+                    check(OpenCVUtils.init(this@ImageTestActivity)) { "OpenCVUtils 初始化失败（opencv_java4 已尝试加载）" }
                     val loadedPaddle = PaddleOCR.create(this@ImageTestActivity)
                     paddle = loadedPaddle
                     report.appendLine("PP-OCRv6 初始化：成功｜模型加载耗时 ${loadedPaddle.coldLoadTimeMs} ms")
