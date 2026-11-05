@@ -9,6 +9,7 @@ import kotlin.math.min
 object FreightAmountExtractor {
     data class Line(val text: String, val left: Float, val top: Float, val right: Float, val bottom: Float) {
         val height: Float get() = max(1f, bottom - top)
+        val width: Float get() = max(1f, right - left)
     }
     data class Candidate(val amount: Double, val source: String, val variant: String, val method: String)
     data class Result(val confirmedAmount: Double?, val state: String, val candidates: List<Candidate>, val details: String)
@@ -73,43 +74,55 @@ object FreightAmountExtractor {
         if (ml == null || ml.optString("status") != "success") null else fromMl(ml.toString(), variant, "ML Kit")
 
     /**
-     * Resolve evidence within each image scale first. Low-resolution mistakes must not veto
-     * a same-scale agreement from the 2x image.
+     * Prefer same-scale engine agreement. If that is unavailable, accept only an exact
+     * cross-scale match between 2x and grayscale-2x evidence. A lone enhanced result is
+     * never enough to auto-confirm a fare.
      */
     fun resolve(candidates: List<Candidate?>): Result {
         val valid = candidates.filterNotNull()
         fun amountKey(value: Double) = (value * 100.0).toLong()
         fun group(variant: String) = valid.filter { it.variant == variant }
-        fun consensus(rows: List<Candidate?>): Double? {
-            val present = rows.filterNotNull()
-            if (present.size < 2) return null
-            val values = present.map { amountKey(it.amount) }.distinct()
-            return if (values.size == 1) present.first().amount else null
+        fun consensus(rows: List<Candidate>): Double? {
+            if (rows.size < 2) return null
+            val values = rows.map { amountKey(it.amount) }.distinct()
+            return if (values.size == 1) rows.first().amount else null
         }
         val original = group("original")
         val twoX = group("upscale_2x")
-        val details = if (valid.isEmpty()) "未找到与“用户出价”标签可靠关联的金额"
+        val gray = group("gray_enhanced_2x")
+        val allDetails = if (valid.isEmpty()) "未找到候选金额"
             else valid.joinToString("；") {
-                it.source + "/" + it.variant + "=" + it.amount + "（" + it.method + "）"
+                "${it.source}/${it.variant}=${it.amount}（${it.method}）"
             }
         val originalConsensus = consensus(original)
         val twoXConsensus = consensus(twoX)
+        val enhancedConsensus = consensus(gray)
+        val transformed = twoX + gray
+        val transformedValues = transformed.map { amountKey(it.amount) }.distinct()
+        val crossScaleConsensus = if (twoX.isNotEmpty() && gray.isNotEmpty() &&
+            transformedValues.size == 1) transformed.first().amount else null
+
         return when {
             originalConsensus != null ->
                 Result(originalConsensus, "CONFIRMED_ORIGINAL", valid,
-                    details + "；原图同尺度双引擎一致，采用原图结果；其他尺度不参与否决")
+                    "$allDetails；原图双引擎一致，采用原图结果")
             twoXConsensus != null ->
                 Result(twoXConsensus, "CONFIRMED_2X", valid,
-                    details + "；原图证据不一致或不足，2倍图同尺度双引擎一致，采用2倍图结果")
+                    "$allDetails；2倍图双引擎一致，采用2倍图结果")
+            crossScaleConsensus != null ->
+                Result(crossScaleConsensus, "CONFIRMED_CROSS_SCALE", valid,
+                    "$allDetails；普通2倍图与灰度增强2倍图候选一致，跨尺度确认")
             valid.isEmpty() ->
-                Result(null, "MISSING", emptyList(), details + "；运费待确认")
+                Result(null, "MISSING", emptyList(), "$allDetails；金额待确认")
             original.size >= 2 && original.map { amountKey(it.amount) }.distinct().size > 1 ->
-                Result(null, "CONFLICT", valid, details + "；原图双引擎冲突且2倍图没有一致结论，运费待确认")
+                Result(null, "CONFLICT", valid, "$allDetails；原图双引擎冲突，金额待确认")
             twoX.size >= 2 && twoX.map { amountKey(it.amount) }.distinct().size > 1 ->
-                Result(null, "CONFLICT", valid, details + "；2倍图双引擎冲突，运费待确认")
+                Result(null, "CONFLICT", valid, "$allDetails；2倍图双引擎冲突，金额待确认")
+            transformedValues.size > 1 ->
+                Result(null, "CONFLICT", valid, "$allDetails；放大/灰度尺度候选冲突，金额待确认")
             else ->
                 Result(null, "INSUFFICIENT_EVIDENCE", valid,
-                    details + "；同一尺度缺少两个引擎的一致证据，运费待确认")
+                    "$allDetails；缺少同尺度双引擎一致或2倍与灰度跨尺度一致证据，金额待确认")
         }
     }
 
@@ -119,25 +132,41 @@ object FreightAmountExtractor {
             val tail = label.text.substringAfter("用户出价", "")
             parseNumber(tail)?.let { return Candidate(it, source, variant, "同一文字框") }
         }
+
         for (label in labels) {
-            val nearby = lines.asSequence().filter { it !== label && !isReward(it.text) }.filter { row ->
-                val overlap = max(0f, min(label.bottom, row.bottom) - max(label.top, row.top))
-                val ratio = overlap / min(label.height, row.height)
-                val centerDelta = abs((label.top + label.bottom) / 2f - (row.top + row.bottom) / 2f)
-                val gap = row.left - label.right
-                ratio >= 0.25f && centerDelta <= max(label.height, row.height) * 0.65f &&
-                    gap >= -label.height * 0.40f && gap <= max(label.height * 2.5f, 80f)
-            }.sortedBy { it.left }.mapNotNull { parseNumber(it.text) }.firstOrNull()
-            if (nearby != null) return Candidate(nearby, source, variant, "标签右侧同水平文字框")
+            val nearby = lines.asSequence()
+                .filter { it !== label && !isReward(it.text) }
+                .mapNotNull { row ->
+                    val amount = parseNumber(row.text) ?: return@mapNotNull null
+                    val overlap = max(0f, min(label.bottom, row.bottom) - max(label.top, row.top))
+                    val overlapRatio = overlap / min(label.height, row.height)
+                    val centerDelta = abs((label.top + label.bottom) / 2f - (row.top + row.bottom) / 2f)
+                    val gap = row.left - label.right
+                    val height = max(label.height, row.height)
+                    // OCR may split one visual phrase into overlapping boxes. Permit overlap,
+                    // but reject text that is far away or on a clearly different row.
+                    val sameRow = overlapRatio >= 0.12f || centerDelta <= height * 0.82f
+                    val plausibleHorizontal = gap >= -height * 1.60f && gap <= max(height * 4.0f, 120f)
+                    if (!sameRow || !plausibleHorizontal) return@mapNotNull null
+                    val score = centerDelta / height + abs(gap) / height * 0.12f
+                    Triple(row, amount, score)
+                }
+                .sortedBy { it.third }
+                .firstOrNull()
+            if (nearby != null) return Candidate(nearby.second, source, variant,
+                "空间关联文字框(overlap/center/gap score=${"%.2f".format(Locale.US, nearby.third)})")
         }
+
         val compact = fallbackText.replace('．', '.').replace('：', ':')
-        val match = Regex("""用户出价[^\d]{0,8}([0-9]{1,7}(?:\.[0-9]{1,2})?)""").find(compact)
-        return match?.groupValues?.getOrNull(1)?.toDoubleOrNull()?.let { Candidate(it, source, variant, "同一文本行") }
+        val match = Regex("""用户出价[^\d]{0,12}([0-9]{1,7}(?:\.[0-9]{1,2})?)""").find(compact)
+        return match?.groupValues?.getOrNull(1)?.toDoubleOrNull()
+            ?.let { Candidate(it, source, variant, "同一文本行回退") }
     }
 
     private fun parseNumber(text: String): Double? {
         if (isReward(text)) return null
-        val match = numberRegex.find(text.replace('．', '.').replace(',', ' ')) ?: return null
+        val normalized = text.replace('．', '.').replace(',', ' ')
+        val match = numberRegex.find(normalized) ?: return null
         return match.groupValues[1].toDoubleOrNull()
     }
 
