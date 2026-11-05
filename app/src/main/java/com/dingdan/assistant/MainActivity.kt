@@ -126,6 +126,69 @@ class MainActivity : ComponentActivity() {
         body.addView(actionButton("测试大模型 API 连通性", 0xFF426B55.toInt()) { testApi() })
         body.addView(actionButton("清空测试输出", 0xFF687581.toInt()) { output.text = "等待测试或识别结果…" })
 
+        body.addView(section("订单判断模拟测试", ink))
+        body.addView(text("手动输入订单数据，单独验证规则引擎；不会接触真实订单，也不会自动抢单。", 12f, muted))
+        fun numberField(hint: String, value: String, decimal: Boolean): EditText =
+            edit(hint).apply {
+                setText(value)
+                inputType = if (decimal)
+                    android.text.InputType.TYPE_CLASS_NUMBER or android.text.InputType.TYPE_NUMBER_FLAG_DECIMAL or android.text.InputType.TYPE_NUMBER_FLAG_SIGNED
+                else android.text.InputType.TYPE_CLASS_NUMBER or android.text.InputType.TYPE_NUMBER_FLAG_SIGNED
+            }
+        val simFreight = numberField("运费（元）", "240", true)
+        val simKm = numberField("载货道路里程（km）", "30", true)
+        val simExtra = numberField("司机额外成本（元）", "20", true)
+        val simFloor = numberField("最低载货公里单价（元/km）", "6", true)
+        val simPickup = numberField("装货点数量", "1", false)
+        val simDelivery = numberField("卸货点数量", "1", false)
+        listOf(simFreight, simKm, simExtra, simFloor, simPickup, simDelivery).forEach { body.addView(it) }
+        val simVehicle = Spinner(this).apply {
+            adapter = ArrayAdapter(this@MainActivity, android.R.layout.simple_spinner_dropdown_item,
+                listOf("车辆匹配", "车辆不匹配", "车辆未知"))
+        }
+        body.addView(text("车辆适配情况", 12f, muted))
+        body.addView(simVehicle)
+        val simCostConfirmed = Switch(this).apply { text = "司机额外成本已核实"; isChecked = true }
+        val simRequirementsClear = Switch(this).apply { text = "备注关键要求已确认"; isChecked = true }
+        body.addView(simCostConfirmed)
+        body.addView(simRequirementsClear)
+        body.addView(actionButton("开始模拟判断", accent) {
+            val freight = simFreight.text.toString().toDoubleOrNull()
+            val km = simKm.text.toString().toDoubleOrNull()
+            val extra = simExtra.text.toString().toDoubleOrNull()
+            val floor = simFloor.text.toString().toDoubleOrNull()
+            val pickup = simPickup.text.toString().toIntOrNull()
+            val delivery = simDelivery.text.toString().toIntOrNull()
+            val match = when (simVehicle.selectedItemPosition) {
+                0 -> OrderDecisionEngine.Match.MATCHED
+                1 -> OrderDecisionEngine.Match.MISMATCHED
+                else -> OrderDecisionEngine.Match.UNKNOWN
+            }
+            val result = OrderDecisionEngine.evaluate(
+                OrderDecisionEngine.Facts(
+                    freight, km, floor, match, pickup, delivery, extra,
+                    simCostConfirmed.isChecked, simRequirementsClear.isChecked
+                )
+            )
+            val verdictText = when (result.verdict) {
+                OrderDecisionEngine.Verdict.RECOMMEND -> "推荐接单"
+                OrderDecisionEngine.Verdict.IGNORE -> "忽略订单"
+                OrderDecisionEngine.Verdict.PENDING -> "待确认"
+            }
+            output.text = buildString {
+                appendLine("订单模拟判断结果：$verdictText")
+                appendLine("毛载货公里单价：${result.grossYuanPerLoadedKm?.let { "%.2f".format(it) } ?: "无法计算"} 元/km")
+                appendLine("扣除额外成本后净运费：${result.netFreightYuan?.let { "%.2f".format(it) } ?: "无法计算"} 元")
+                appendLine("净载货公里单价：${result.netYuanPerLoadedKm?.let { "%.2f".format(it) } ?: "无法计算"} 元/km")
+                appendLine("判断依据：")
+                result.reasons.forEach { appendLine("• $it") }
+                appendLine()
+                appendLine("提示：结果仅验证当前规则引擎；里程、备注解析和车辆数据仍需真实来源确认。")
+            }
+            status.text = "模拟判断完成：$verdictText"
+        })
+
+
         body.addView(section("API 配置", ink))
         apiBase = edit("API 基址，例如 https://apihub.example/v1")
         apiKey = edit("API Key").apply {
