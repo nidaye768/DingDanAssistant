@@ -48,7 +48,7 @@ object OrderDecisionEngine {
             if (actual == null) {
                 if (facts.rules.unknownCountAction == OrderRuleConfig.UnknownAction.IGNORE)
                     return Result(Verdict.IGNORE, null, null, null, listOf("${label}数量未知，当前设置为忽略"))
-                reasons += "$label数量未知，待确认"
+                reasons += "${label}数量未知，待确认"
                 return null
             }
             if (!facts.rules.allowsCount(actual, mode, limit)) {
