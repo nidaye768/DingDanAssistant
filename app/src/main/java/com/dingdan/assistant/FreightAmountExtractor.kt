@@ -72,16 +72,44 @@ object FreightAmountExtractor {
     fun fromDiagnosticMl(ml: JSONObject?, variant: String): Candidate? =
         if (ml == null || ml.optString("status") != "success") null else fromMl(ml.toString(), variant, "ML Kit")
 
+    /**
+     * Resolve evidence within each image scale first. Low-resolution mistakes must not veto
+     * a same-scale agreement from the 2x image.
+     */
     fun resolve(candidates: List<Candidate?>): Result {
         val valid = candidates.filterNotNull()
-        val values = valid.map { it.amount }.distinctBy { (it * 100.0).toLong() }
+        fun amountKey(value: Double) = (value * 100.0).toLong()
+        fun group(variant: String) = valid.filter { it.variant == variant }
+        fun consensus(rows: List<Candidate?>): Double? {
+            val present = rows.filterNotNull()
+            if (present.size < 2) return null
+            val values = present.map { amountKey(it.amount) }.distinct()
+            return if (values.size == 1) present.first().amount else null
+        }
+        val original = group("original")
+        val twoX = group("upscale_2x")
         val details = if (valid.isEmpty()) "未找到与“用户出价”标签可靠关联的金额"
-            else valid.joinToString("；") { it.source + "/" + it.variant + "=" + it.amount + "（" + it.method + "）" }
+            else valid.joinToString("；") {
+                it.source + "/" + it.variant + "=" + it.amount + "（" + it.method + "）"
+            }
+        val originalConsensus = consensus(original)
+        val twoXConsensus = consensus(twoX)
         return when {
-            valid.isEmpty() -> Result(null, "MISSING", emptyList(), details + "；运费待确认")
-            values.size > 1 -> Result(null, "CONFLICT", valid, details + "；证据金额冲突，运费待确认")
-            valid.size < 2 -> Result(null, "INSUFFICIENT_EVIDENCE", valid, details + "；独立证据不足，运费待确认")
-            else -> Result(values.first(), "CONFIRMED", valid, details + "；多路证据一致")
+            originalConsensus != null ->
+                Result(originalConsensus, "CONFIRMED_ORIGINAL", valid,
+                    details + "；原图同尺度双引擎一致，采用原图结果；其他尺度不参与否决")
+            twoXConsensus != null ->
+                Result(twoXConsensus, "CONFIRMED_2X", valid,
+                    details + "；原图证据不一致或不足，2倍图同尺度双引擎一致，采用2倍图结果")
+            valid.isEmpty() ->
+                Result(null, "MISSING", emptyList(), details + "；运费待确认")
+            original.size >= 2 && original.map { amountKey(it.amount) }.distinct().size > 1 ->
+                Result(null, "CONFLICT", valid, details + "；原图双引擎冲突且2倍图没有一致结论，运费待确认")
+            twoX.size >= 2 && twoX.map { amountKey(it.amount) }.distinct().size > 1 ->
+                Result(null, "CONFLICT", valid, details + "；2倍图双引擎冲突，运费待确认")
+            else ->
+                Result(null, "INSUFFICIENT_EVIDENCE", valid,
+                    details + "；同一尺度缺少两个引擎的一致证据，运费待确认")
         }
     }
 
@@ -98,7 +126,7 @@ object FreightAmountExtractor {
                 val centerDelta = abs((label.top + label.bottom) / 2f - (row.top + row.bottom) / 2f)
                 val gap = row.left - label.right
                 ratio >= 0.25f && centerDelta <= max(label.height, row.height) * 0.65f &&
-                    gap >= -label.height * 0.15f && gap <= max(label.height * 2.5f, 80f)
+                    gap >= -label.height * 0.40f && gap <= max(label.height * 2.5f, 80f)
             }.sortedBy { it.left }.mapNotNull { parseNumber(it.text) }.firstOrNull()
             if (nearby != null) return Candidate(nearby, source, variant, "标签右侧同水平文字框")
         }
