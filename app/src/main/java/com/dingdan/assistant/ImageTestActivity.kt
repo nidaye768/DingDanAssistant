@@ -380,6 +380,7 @@ class ImageTestActivity : ComponentActivity() {
         val prompt = """
 你是货运订单图片识别与备注结构化解析器。必须同时查看原始订单图片，并交叉比较下方 PP-OCRv6 与 ML Kit 两套OCR文本。两套OCR都可能出错，不能默认PP-OCRv6优先，也不能把任一OCR文本当成事实；以图片中清晰可见的内容为准。
 关键字段（尤其运费/用户出价/多赚金额、车型车长、地址、时间、装卸数量）必须逐项对照图片。金额标签必须区分：“多赚XX元”不是“用户出价XX元”，不得混为同一个金额；仔细核对小数点，不能把61.6识别成616或6.16，也不能把42识别成4.2。
+金额必须写入独立字段：用户出价/订单运费写入freight_yuan；“多赚XX元”等平台额外奖励写入extra_reward_yuan。例：“多赚42元”→extra_reward_yuan=42，“用户出价61.6元”→freight_yuan=61.6。两者不能相加、互换或互相替代；图片无法确认时对应字段为null，并在unclear_items中注明。
 如果图片本身也无法清楚确认，相关字段必须保持null，并在unclear_items中写明冲突原文及“需人工核实”，不得自行猜测或按某一OCR引擎强行定值。
 必须只返回一个合法JSON对象，不要Markdown代码围栏或JSON以外的说明。
 无法确认的字符串、数字和数量一律返回null；数组没有明确内容时返回空数组。
@@ -395,6 +396,8 @@ class ImageTestActivity : ComponentActivity() {
   "cargo_weight_kg": null,
   "cargo_volume_m3": null,
   "cargo_length_m": null,
+  "freight_yuan": null,
+  "extra_reward_yuan": null,
   "pickup_count": null,
   "delivery_count": null,
   "driver_extra_cost_yuan": null,
