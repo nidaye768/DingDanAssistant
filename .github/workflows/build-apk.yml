@@ -26,6 +26,9 @@ jobs:
         with:
           gradle-version: '8.9'
 
+      - name: Prepare PP-OCRv6 SDK and models
+        run: bash scripts/prepare_ppocr.sh
+
       # 固定签名钥匙：缓存复用，保证每次产物签名一致，可覆盖安装
       - name: Restore signing keystore
         id: keystore
