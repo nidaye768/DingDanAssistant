@@ -306,23 +306,32 @@ class MainActivity : ComponentActivity() {
                                 ""
                             }
                             status.text = "完整订单 ${index + 1}/${complete.size}：ML Kit辅助校验中…"
-                            val mlKitText = try {
+                            var mlKitError = ""
+                            val mlKitResult = try {
                                 val recognizer = TextRecognition.getClient(ChineseTextRecognizerOptions.Builder().build())
-                                try { recognizer.process(InputImage.fromBitmap(orderBitmap, 0)).awaitResult().text }
+                                try { recognizer.process(InputImage.fromBitmap(orderBitmap, 0)).awaitResult() }
                                 finally { recognizer.close() }
                             } catch (e: Exception) {
-                                "ML Kit辅助校验失败：" + (e.localizedMessage ?: e.javaClass.simpleName)
+                                mlKitError = e.localizedMessage ?: e.javaClass.simpleName
+                                null
                             }
-                            val usableMlKitText = mlKitText.takeUnless { it.startsWith("ML Kit辅助校验失败：") }.orEmpty()
+                            val usableMlKitText = mlKitResult?.text.orEmpty()
+                            val ppLineEvidence = ppDiagnostic.substringAfter("文字行证据：", "")
+                            val mlLineEvidence = mlKitResult?.let { serializeMlKitEvidence(it) } ?: "{}"
                             val ocrEvidence = buildString {
                                 appendLine("【PP-OCRv6原始识别】")
                                 appendLine(if (ppText.isBlank()) "（无有效文本）" else ppText)
+                                appendLine("【PP-OCRv6文字框/置信度】")
+                                appendLine(ppLineEvidence)
                                 appendLine("【ML Kit原始识别】")
                                 appendLine(if (usableMlKitText.isBlank()) "（无有效文本）" else usableMlKitText)
+                                appendLine("【ML Kit文字框/置信度】")
+                                appendLine(mlLineEvidence)
                             }.trim()
                             report.appendLine("PP-OCRv6主引擎：\n" + if (ppText.isBlank()) "无有效文本" else ppText)
                             report.appendLine("PP-OCRv6运行信息：$ppDiagnostic")
-                            report.appendLine("ML Kit辅助校验：\n" + mlKitText)
+                            report.appendLine("ML Kit辅助校验：\n" + if (mlKitError.isBlank()) usableMlKitText else "失败：$mlKitError")
+                            report.appendLine("ML Kit文字框证据：$mlLineEvidence")
                             if (ppText.isNotBlank() || usableMlKitText.isNotBlank()) {
                                 status.text = "完整订单 ${index + 1}/${complete.size}：提交双引擎证据供 AI 对照…"
                                 requestVision(orderBitmap, ocrEvidence)
@@ -340,6 +349,23 @@ class MainActivity : ComponentActivity() {
             })
     }
 
+    private fun serializeMlKitEvidence(text: com.google.mlkit.vision.text.Text): String {
+        val blocks = JSONArray()
+        text.textBlocks.forEach { block ->
+            val lines = JSONArray()
+            block.lines.forEach { line ->
+                val box = line.boundingBox
+                val item = JSONObject().put("text", line.text).put("confidence", line.confidence)
+                if (box != null) item.put("bounding_box", JSONObject()
+                    .put("left", box.left).put("top", box.top)
+                    .put("right", box.right).put("bottom", box.bottom))
+                lines.put(item)
+            }
+            blocks.put(JSONObject().put("text", block.text).put("lines", lines))
+        }
+        return JSONObject().put("recognized_text", text.text).put("blocks", blocks).toString()
+    }
+
     private suspend fun recognizeWithPaddle(bitmap: Bitmap): Pair<String, String> {
         // PaddleOCR.create、recognize 均为 suspend API；调用方在 Dispatchers.IO 中执行。
         val engine = paddleOcr ?: run {
@@ -349,7 +375,11 @@ class MainActivity : ComponentActivity() {
         }
         val result = engine.recognize(bitmap)
         val recognizedText = result.results.joinToString("\n") { it.text }.trim()
-        val details = "模型已加载｜检测 ${result.detectionTimeMs}ms｜识别 ${result.recognitionTimeMs}ms｜总计 ${result.totalTimeMs}ms｜文本行 ${result.lineCount}"
+        val lineEvidence = result.results.joinToString(" || ") { line ->
+            val points = line.box.points.joinToString(" ") { "(${it.x.toInt()},${it.y.toInt()})" }
+            "text=${line.text}; confidence=${"%.3f".format(java.util.Locale.US, line.confidence)}; points=$points"
+        }
+        val details = "模型已加载｜检测 ${result.detectionTimeMs}ms｜识别 ${result.recognitionTimeMs}ms｜总计 ${result.totalTimeMs}ms｜文本行 ${result.lineCount}｜文字行证据：$lineEvidence"
         return recognizedText to details
     }
 
@@ -418,9 +448,8 @@ class MainActivity : ComponentActivity() {
                     bitmap.compress(Bitmap.CompressFormat.JPEG, 82, bytes)
                     val encoded = Base64.encodeToString(bytes.toByteArray(), Base64.NO_WRAP)
                     val prompt = """
-你是货运订单图片识别与备注结构化解析器。必须同时查看原始订单图片，并交叉比较下方 PP-OCRv6 与 ML Kit 两套OCR文本。两套OCR都可能出错，不能默认PP-OCRv6优先，也不能把任一OCR文本当成事实；以图片中清晰可见的内容为准。
-关键字段（尤其运费/用户出价/多赚金额、车型车长、地址、时间、装卸数量）必须逐项对照图片。金额标签必须区分：“多赚XX元”不是“用户出价XX元”，不得混为同一个金额；仔细核对小数点，不能把61.6识别成616或6.16，也不能把42识别成4.2。
-金额必须写入独立字段：用户出价/订单运费写入freight_yuan；“多赚XX元”等平台额外奖励写入extra_reward_yuan。例：“多赚42元”→extra_reward_yuan=42，“用户出价61.6元”→freight_yuan=61.6。两者不能相加、互换或互相替代；图片无法确认时对应字段为null，并在unclear_items中注明。
+你是货运订单图片识别与备注结构化解析器。必须查看原始订单图片，并把 PP-OCRv6 与 ML Kit 的原始文本及文字框证据作为辅助。两套OCR都可能出错，不能把任一OCR文本当成事实；以图片中清晰可见的内容为准。
+核心字段包括用户出价/订单运费、车型车长、地址、时间、装卸数量。运费只认“用户出价”对应的金额；平台奖励（例如“多赚XX元”）完全忽略，不得写入运费，也不需要提取或比较。仔细核对金额小数点；图片无法确认用户出价时 freight_yuan 必须为null，并在unclear_items中注明。
 如果图片本身也无法清楚确认，相关字段必须保持null，并在unclear_items中写明冲突原文及“需人工核实”，不得自行猜测或按某一OCR引擎强行定值。
 必须只返回一个合法JSON对象，不要Markdown代码围栏或JSON以外的说明。
 无法确认的字符串、数字和数量一律返回null；数组没有明确内容时返回空数组。
@@ -437,7 +466,6 @@ class MainActivity : ComponentActivity() {
   "cargo_volume_m3": null,
   "cargo_length_m": null,
   "freight_yuan": null,
-  "extra_reward_yuan": null,
   "pickup_count": null,
   "delivery_count": null,
   "driver_extra_cost_yuan": null,

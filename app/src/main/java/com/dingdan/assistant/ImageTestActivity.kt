@@ -279,14 +279,18 @@ class ImageTestActivity : ComponentActivity() {
                     status.text = "正在 OCR：第 ${index + 1}/${targets.size} 个区域…"
                     report.appendLine("\n========== 识别对象 " + (index + 1) + " ==========")
                     saved.add("target_" + (index + 1) + ".jpg" to bitmap)
-                    val text = try {
-                        recognizer.process(InputImage.fromBitmap(bitmap, 0)).awaitResult().text
+                    val mlKitResult = try {
+                        recognizer.process(InputImage.fromBitmap(bitmap, 0)).awaitResult()
                     } catch (e: Exception) {
-                        failures++; report.appendLine("OCR失败：" + e.localizedMessage); ""
+                        failures++; report.appendLine("ML Kit OCR失败：" + e.localizedMessage); null
                     }
+                    val text = mlKitResult?.text.orEmpty()
+                    val mlKitEvidence = mlKitResult?.let { serializeMlKitEvidence(it) }.orEmpty()
                     report.appendLine("【ML Kit 中文 OCR｜辅助校验，不覆盖主引擎】")
                     report.appendLine("原始文本：\n" + if (text.isBlank()) "（无文字）" else text)
+                    report.appendLine("文字框/置信度 JSON：\n" + if (mlKitEvidence.isBlank()) "不可用" else mlKitEvidence)
                     var ppPrimaryText = ""
+                    var ppPrimaryEvidence = ""
                     try {
                         val pp = paddle
                         if (pp == null) {
@@ -295,6 +299,10 @@ class ImageTestActivity : ComponentActivity() {
                             status.text = "正在运行 PP-OCRv6：第 ${index + 1}/${targets.size} 个区域…"
                             val ppResult = pp.recognize(bitmap)
                             ppPrimaryText = ppResult.results.joinToString("\n") { it.text }.trim()
+                            ppPrimaryEvidence = ppResult.results.joinToString("\n") { line ->
+                                val points = line.box.points.joinToString(" ") { "(${it.x.toInt()},${it.y.toInt()})" }
+                                "文本=${line.text}｜置信度=${"%.3f".format(Locale.US, line.confidence)}｜坐标=$points"
+                            }
                             report.appendLine("\n【PP-OCRv6｜主引擎结果】")
                             report.appendLine("主引擎提取文本：\n" + if (ppPrimaryText.isBlank()) "（无文字）" else ppPrimaryText)
                             report.appendLine("文本行数：${ppResult.lineCount}")
@@ -315,8 +323,12 @@ class ImageTestActivity : ComponentActivity() {
                     val visionOcrText = buildString {
                         appendLine("【PP-OCRv6原始识别】")
                         appendLine(if (ppPrimaryText.isBlank()) "（无有效文本）" else ppPrimaryText)
+                        appendLine("【PP-OCRv6文字框/置信度】")
+                        appendLine(ppPrimaryEvidence)
                         appendLine("【ML Kit原始识别】")
                         appendLine(if (text.isBlank()) "（无有效文本）" else text)
+                        appendLine("【ML Kit文字框/置信度】")
+                        appendLine(mlKitEvidence)
                     }.trim()
                     if (base.isNotBlank() && key.isNotBlank() && model.isNotBlank() &&
                         (ppPrimaryText.isNotBlank() || text.isNotBlank())) {
@@ -366,6 +378,23 @@ class ImageTestActivity : ComponentActivity() {
         }
     }
 
+    private fun serializeMlKitEvidence(text: com.google.mlkit.vision.text.Text): String {
+        val blocks = JSONArray()
+        text.textBlocks.forEach { block ->
+            val lines = JSONArray()
+            block.lines.forEach { line ->
+                val box = line.boundingBox
+                val item = JSONObject().put("text", line.text).put("confidence", line.confidence)
+                if (box != null) item.put("bounding_box", JSONObject()
+                    .put("left", box.left).put("top", box.top)
+                    .put("right", box.right).put("bottom", box.bottom))
+                lines.put(item)
+            }
+            blocks.put(JSONObject().put("text", block.text).put("lines", lines))
+        }
+        return JSONObject().put("recognized_text", text.text).put("blocks", blocks).toString()
+    }
+
     private suspend fun askVision(base: String, key: String, model: String, bitmap: Bitmap, ocr: String): String {
         val encoded = withContext(Dispatchers.Default) {
             val scaled = if (bitmap.width > 1600 || bitmap.height > 1600) {
@@ -378,9 +407,8 @@ class ImageTestActivity : ComponentActivity() {
             android.util.Base64.encodeToString(bytes.toByteArray(), android.util.Base64.NO_WRAP)
         }
         val prompt = """
-你是货运订单图片识别与备注结构化解析器。必须同时查看原始订单图片，并交叉比较下方 PP-OCRv6 与 ML Kit 两套OCR文本。两套OCR都可能出错，不能默认PP-OCRv6优先，也不能把任一OCR文本当成事实；以图片中清晰可见的内容为准。
-关键字段（尤其运费/用户出价/多赚金额、车型车长、地址、时间、装卸数量）必须逐项对照图片。金额标签必须区分：“多赚XX元”不是“用户出价XX元”，不得混为同一个金额；仔细核对小数点，不能把61.6识别成616或6.16，也不能把42识别成4.2。
-金额必须写入独立字段：用户出价/订单运费写入freight_yuan；“多赚XX元”等平台额外奖励写入extra_reward_yuan。例：“多赚42元”→extra_reward_yuan=42，“用户出价61.6元”→freight_yuan=61.6。两者不能相加、互换或互相替代；图片无法确认时对应字段为null，并在unclear_items中注明。
+你是货运订单图片识别与备注结构化解析器。必须查看原始订单图片，并把 PP-OCRv6 与 ML Kit 的原始文本及文字框证据作为辅助。两套OCR都可能出错，不能把任一OCR文本当成事实；以图片中清晰可见的内容为准。
+核心字段包括用户出价/订单运费、车型车长、地址、时间、装卸数量。运费只认“用户出价”对应的金额；平台奖励（例如“多赚XX元”）完全忽略，不得写入运费，也不需要提取或比较。仔细核对金额小数点；图片无法确认用户出价时 freight_yuan 必须为null，并在unclear_items中注明。
 如果图片本身也无法清楚确认，相关字段必须保持null，并在unclear_items中写明冲突原文及“需人工核实”，不得自行猜测或按某一OCR引擎强行定值。
 必须只返回一个合法JSON对象，不要Markdown代码围栏或JSON以外的说明。
 无法确认的字符串、数字和数量一律返回null；数组没有明确内容时返回空数组。
@@ -397,7 +425,6 @@ class ImageTestActivity : ComponentActivity() {
   "cargo_volume_m3": null,
   "cargo_length_m": null,
   "freight_yuan": null,
-  "extra_reward_yuan": null,
   "pickup_count": null,
   "delivery_count": null,
   "driver_extra_cost_yuan": null,

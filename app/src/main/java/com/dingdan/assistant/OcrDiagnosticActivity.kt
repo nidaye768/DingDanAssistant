@@ -280,11 +280,10 @@ class OcrDiagnosticActivity : ComponentActivity() {
 
                     val mlStarted = System.currentTimeMillis()
                     try {
-                        val mlText = recognizer!!.process(InputImage.fromBitmap(bitmap, 0)).awaitResult().text
-                        entry.put("ml_kit", JSONObject()
+                        val mlResult = recognizer!!.process(InputImage.fromBitmap(bitmap, 0)).awaitResult()
+                        entry.put("ml_kit", mlKitEvidence(mlResult)
                             .put("status", "success")
-                            .put("wall_time_ms", System.currentTimeMillis() - mlStarted)
-                            .put("recognized_text", mlText))
+                            .put("wall_time_ms", System.currentTimeMillis() - mlStarted))
                     } catch (e: Exception) {
                         val message = e.localizedMessage ?: e.javaClass.simpleName
                         entry.put("ml_kit", JSONObject().put("status", "failed").put("error", message)
@@ -295,25 +294,50 @@ class OcrDiagnosticActivity : ComponentActivity() {
                 }
                 probes.put("P3_P4_P5_engine_results", engineResults)
 
-                // P6: amount parsing diagnostic. The raw OCR text is preserved separately.
-                val ppCombined = collectText(engineResults, "pp_ocr")
-                val mlCombined = collectText(engineResults, "ml_kit")
-                val ppFare = extractAmount(ppCombined, "用户出价")
-                val mlFare = extractAmount(mlCombined, "用户出价")
-                val ppReward = extractAmount(ppCombined, "多赚")
-                val mlReward = extractAmount(mlCombined, "多赚")
+                // P6: parse each engine against each image variant independently.
+                // Upscaled/grayscale OCR is evidence only and never contaminates original-image results.
+                val variantParsers = JSONArray()
+                var ppOriginalText = ""
+                var mlOriginalText = ""
+                var ppFare: Double? = null
+                var mlFare: Double? = null
+                engineResults.forEach { rawEntry ->
+                    val item = rawEntry as? JSONObject ?: return@forEach
+                    val variant = item.optString("variant", "unknown")
+                    val pp = item.optJSONObject("pp_ocr")
+                    val ml = item.optJSONObject("ml_kit")
+                    val ppText = pp?.optString("recognized_text", "").orEmpty()
+                    val mlText = ml?.optString("recognized_text", "").orEmpty()
+                    val ppValue = if (pp?.optString("status") == "success") extractAmount(ppText, "用户出价") else null
+                    val mlValue = if (ml?.optString("status") == "success") extractAmount(mlText, "用户出价") else null
+                    variantParsers.put(JSONObject()
+                        .put("image_variant", variant)
+                        .put("pp_ocr_status", pp?.optString("status") ?: "missing")
+                        .put("pp_ocr_freight_yuan", ppValue ?: JSONObject.NULL)
+                        .put("pp_ocr_wall_time_ms", pp?.optLong("wall_time_ms") ?: JSONObject.NULL)
+                        .put("ml_kit_status", ml?.optString("status") ?: "missing")
+                        .put("ml_kit_freight_yuan", mlValue ?: JSONObject.NULL)
+                        .put("ml_kit_wall_time_ms", ml?.optLong("wall_time_ms") ?: JSONObject.NULL))
+                    if (variant == "original") {
+                        ppOriginalText = ppText
+                        mlOriginalText = mlText
+                        ppFare = ppValue
+                        mlFare = mlValue
+                    }
+                }
                 val expectedValue = expected.text.toString().trim().toDoubleOrNull()
                 val parser = JSONObject()
                     .put("target_field", "freight_yuan")
                     .put("expected_value", expectedValue ?: JSONObject.NULL)
+                    .put("primary_image_variant", "original")
                     .put("pp_ocr_freight_yuan", ppFare ?: JSONObject.NULL)
                     .put("ml_kit_freight_yuan", mlFare ?: JSONObject.NULL)
-                    .put("pp_ocr_extra_reward_yuan", ppReward ?: JSONObject.NULL)
-                    .put("ml_kit_extra_reward_yuan", mlReward ?: JSONObject.NULL)
-                    .put("regex", "用户出价\\s*[:：]?\\s*(\\d+(?:\\.\\d+)?)")
+                    .put("variant_results", variantParsers)
+                    .put("regex", "用户出价[\\s:：¥￥]*([0-9]{1,7}(?:[.．][0-9]{1,2})?)")
+                    .put("platform_reward", "ignored")
                 probes.put("P6_parser", parser)
 
-                val diagnosis = classify(ppCombined, mlCombined, ppFare, mlFare, expectedValue)
+                val diagnosis = classify(ppOriginalText, mlOriginalText, ppFare, mlFare, expectedValue)
                 probes.put("automatic_diagnosis", diagnosis)
                 probes.put("failures", failures)
                 probes.put("elapsed_total_ms", System.currentTimeMillis() - started)
@@ -348,11 +372,9 @@ class OcrDiagnosticActivity : ComponentActivity() {
                         appendLine("设备：${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL} / Android ${android.os.Build.VERSION.RELEASE}")
                         appendLine("目标字段：freight_yuan")
                         appendLine("预期运费：${expectedValue ?: "未填写"}")
-                        appendLine("自动诊断：$diagnosis")
+                        appendLine("自动诊断（仅原图）：$diagnosis")
                         appendLine("PP-OCR 提取用户出价：${ppFare ?: "未提取"}")
                         appendLine("ML Kit 提取用户出价：${mlFare ?: "未提取"}")
-                        appendLine("PP-OCR 多赚金额：${ppReward ?: "未提取"}")
-                        appendLine("ML Kit 多赚金额：${mlReward ?: "未提取"}")
                         appendLine("总耗时：${System.currentTimeMillis() - started} ms")
                         appendLine()
                         appendLine("========== 结构化探针 JSON ==========")
@@ -376,8 +398,6 @@ class OcrDiagnosticActivity : ComponentActivity() {
                     appendLine("自动诊断：$diagnosis")
                     appendLine("PP-OCR 用户出价：${ppFare ?: "未提取"}")
                     appendLine("ML Kit 用户出价：${mlFare ?: "未提取"}")
-                    appendLine("PP-OCR 多赚奖励：${ppReward ?: "未提取"}")
-                    appendLine("ML Kit 多赚奖励：${mlReward ?: "未提取"}")
                     appendLine()
                     appendLine("详细报告与原图、裁剪图、放大图、检测框图已保存。")
                     appendLine("点击下方按钮导出 ZIP 发给我分析。")
@@ -405,16 +425,25 @@ class OcrDiagnosticActivity : ComponentActivity() {
         try { if (!roi.isRecycled) roi.recycle() } catch (_: Exception) { }
     }
 
-    private fun collectText(results: JSONArray, engineKey: String): String = buildString {
-        for (i in 0 until results.length()) {
-            val engine = results.optJSONObject(i)?.optJSONObject(engineKey) ?: continue
-            appendLine(engine.optString("recognized_text", ""))
+    private fun mlKitEvidence(text: com.google.mlkit.vision.text.Text): JSONObject {
+        val lines = JSONArray()
+        text.textBlocks.forEach { block ->
+            block.lines.forEach { line ->
+                val box = line.boundingBox
+                val item = JSONObject().put("text", line.text).put("confidence", line.confidence)
+                if (box != null) item.put("bounding_box", JSONObject()
+                    .put("left", box.left).put("top", box.top)
+                    .put("right", box.right).put("bottom", box.bottom))
+                lines.put(item)
+            }
         }
+        return JSONObject().put("recognized_text", text.text).put("lines", lines)
     }
 
     private fun extractAmount(text: String, label: String): Double? {
-        val pattern = Regex(Regex.escape(label) + "\\s*[:：]?\\s*[¥￥]?\\s*(\\d+(?:\\.\\d+)?)")
-        return pattern.find(text)?.groupValues?.getOrNull(1)?.toDoubleOrNull()
+        val normalized = text.replace('．', '.').replace('：', ':').replace('　', ' ')
+        val pattern = Regex(Regex.escape(label) + "[\\s:：¥￥]*([0-9]{1,7}(?:\\.[0-9]{1,2})?)")
+        return pattern.find(normalized)?.groupValues?.getOrNull(1)?.toDoubleOrNull()
     }
 
     private fun classify(pp: String, ml: String, ppFare: Double?, mlFare: Double?, expectedValue: Double?): String {
