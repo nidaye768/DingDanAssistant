@@ -318,10 +318,12 @@ class MainActivity : ComponentActivity() {
                             val ppStarted = trace.mark()
                             trace.event("OCR_PP_ORIGINAL_" + (index + 1), "START")
                             val ppText = try {
-                                withContext(Dispatchers.IO) {
+                                val recognized = withContext(Dispatchers.IO) {
                                     recognizeWithPaddle(orderBitmap).also { ppDiagnostic = it.second }.first
-                                }.also { trace.event("OCR_PP_ORIGINAL_" + (index + 1), "SUCCESS", ppStarted,
-                                    JSONObject().put("text_length", it.length).put("text_preview", it.take(300))) }
+                                }
+                                trace.event("OCR_PP_ORIGINAL_" + (index + 1), "SUCCESS", ppStarted,
+                                    JSONObject().put("text_length", recognized.length).put("text_preview", recognized.take(300)))
+                                recognized
                             } catch (e: Exception) {
                                 trace.error("OCR_PP_ORIGINAL_" + (index + 1), ppStarted, e)
                                 ppDiagnostic = "PP-OCRv6失败：" + (e.localizedMessage ?: e.javaClass.simpleName)
@@ -354,10 +356,11 @@ class MainActivity : ComponentActivity() {
                             trace.event("OCR_PP_2X_" + (index + 1), "START", details = JSONObject()
                                 .put("width", twoX.width).put("height", twoX.height))
                             val pp2xError = try {
-                                withContext(Dispatchers.IO) {
+                                val recognized = withContext(Dispatchers.IO) {
                                     recognizeWithPaddle(twoX).also { pp2xEvidence = it.second }.first
-                                }.also { trace.event("OCR_PP_2X_" + (index + 1), "SUCCESS", pp2xStarted,
-                                    JSONObject().put("text_length", it.length).put("text_preview", it.take(300))) }
+                                }
+                                trace.event("OCR_PP_2X_" + (index + 1), "SUCCESS", pp2xStarted,
+                                    JSONObject().put("text_length", recognized.length).put("text_preview", recognized.take(300)))
                                 ""
                             } catch (e: Exception) {
                                 trace.error("OCR_PP_2X_" + (index + 1), pp2xStarted, e)
