@@ -249,17 +249,18 @@ class ImageTestActivity : ComponentActivity() {
             val report = StringBuilder()
             val saved = mutableListOf<Pair<String, Bitmap>>()
             var failures = 0
+            var paddle: PaddleOCR? = null
+            var paddleInitError = ""
+            val recognizer = TextRecognition.getClient(ChineseTextRecognizerOptions.Builder().build())
             try {
                 report.appendLine("测试类型：" + kind)
                 report.appendLine("时间：" + formatTime(started))
                 if (note.isNotBlank()) report.appendLine(note)
-                val recognizer = TextRecognition.getClient(ChineseTextRecognizerOptions.Builder().build())
-                var paddle: PaddleOCR? = null
-                var paddleInitError = ""
                 try {
                     check(OpenCVUtils.init(this@ImageTestActivity)) { "OpenCV 原生库初始化失败" }
-                    paddle = PaddleOCR.create(this@ImageTestActivity)
-                    report.appendLine("PP-OCRv6 初始化：成功｜模型加载耗时 ${paddle.coldLoadTimeMs} ms")
+                    val loadedPaddle = PaddleOCR.create(this@ImageTestActivity)
+                    paddle = loadedPaddle
+                    report.appendLine("PP-OCRv6 初始化：成功｜模型加载耗时 ${loadedPaddle.coldLoadTimeMs} ms")
                 } catch (e: Exception) {
                     paddleInitError = e.localizedMessage ?: e.javaClass.simpleName
                     report.appendLine("PP-OCRv6 初始化失败：$paddleInitError")
