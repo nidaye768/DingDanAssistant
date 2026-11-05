@@ -110,6 +110,9 @@ object FreightAmountExtractor {
             twoXConsensus != null ->
                 Result(twoXConsensus, "CONFIRMED_2X", valid,
                     "$allDetails；2倍图双引擎一致，采用2倍图结果")
+            enhancedConsensus != null ->
+                Result(enhancedConsensus, "CONFIRMED_GRAY_2X", valid,
+                    "$allDetails；灰度增强2倍图双引擎一致，采用灰度增强结果")
             crossScaleConsensus != null ->
                 Result(crossScaleConsensus, "CONFIRMED_CROSS_SCALE", valid,
                     "$allDetails；普通2倍图与灰度增强2倍图候选一致，跨尺度确认")
