@@ -168,6 +168,8 @@ class OcrDiagnosticActivity : ComponentActivity() {
         scope.launch {
             val started = System.currentTimeMillis()
             val id = "OCR_" + timestamp() + "_" + (System.currentTimeMillis() % 10000)
+            val trace = PipelineTrace(this@OcrDiagnosticActivity, "ocr_diagnostic", JSONObject()
+                .put("test_id", id).put("roi_width", roi.width).put("roi_height", roi.height))
             val dir = File(filesDir, "ocr_diagnostics/$id")
             val imagesDir = File(dir, "images")
             val probes = JSONObject()
@@ -176,12 +178,14 @@ class OcrDiagnosticActivity : ComponentActivity() {
             var paddle: PaddleOCR? = null
             var recognizer: com.google.mlkit.vision.text.TextRecognizer? = null
             try {
+                val imageSaveStarted = trace.mark()
+                trace.event("SAVE_SOURCE_IMAGES", "START")
                 withContext(Dispatchers.IO) {
                     check(imagesDir.mkdirs() || imagesDir.isDirectory) { "无法创建诊断目录" }
                     saveJpeg(original, File(imagesDir, "01_original.jpg"))
                     saveJpeg(roi, File(imagesDir, "02_roi_original.jpg"))
                 }
-
+                trace.event("SAVE_SOURCE_IMAGES", "SUCCESS", imageSaveStarted)
                 // P1: source image, ROI geometry and basic image statistics.
                 val imageProbe = JSONObject()
                     .put("source_width", original.width)
@@ -192,6 +196,9 @@ class OcrDiagnosticActivity : ComponentActivity() {
                     .put("source_stats", imageStats(original))
                     .put("roi_stats", imageStats(roi))
                 probes.put("P1_image", imageProbe)
+                trace.event("P1_IMAGE_PROBE", "SUCCESS", details = JSONObject()
+                    .put("source_width", original.width).put("source_height", original.height)
+                    .put("roi_width", roi.width).put("roi_height", roi.height))
 
                 // P2: build controlled variants; each output is persisted for visual inspection.
                 variants.add("original" to roi)
@@ -210,6 +217,7 @@ class OcrDiagnosticActivity : ComponentActivity() {
                         .put("file", "images/$fileName"))
                 }
                 probes.put("P2_preprocess", preprocess)
+                trace.event("P2_PREPROCESS", "SUCCESS", details = JSONObject().put("variant_count", variants.size))
 
                 // P3/P4/P5: run both engines on every controlled image variant.
                 val engineResults = JSONArray()
@@ -221,6 +229,8 @@ class OcrDiagnosticActivity : ComponentActivity() {
                         check(OpenCVUtils.init(this@OcrDiagnosticActivity)) { "OpenCVUtils.init returned false" }
                         PaddleOCR.create(this@OcrDiagnosticActivity)
                     }
+                    trace.event("PP_OCR_INIT", "SUCCESS", initStarted,
+                        JSONObject().put("cold_load_time_ms", paddle?.coldLoadTimeMs ?: JSONObject.NULL))
                     probes.put("pp_ocr_init", JSONObject()
                         .put("status", "success")
                         .put("elapsed_ms", System.currentTimeMillis() - initStarted)
@@ -228,6 +238,7 @@ class OcrDiagnosticActivity : ComponentActivity() {
                 } catch (e: Exception) {
                     ppInitError = e.localizedMessage ?: e.javaClass.simpleName
                     failures.put(JSONObject().put("stage", "PP_OCR_INIT").put("error", ppInitError))
+                    trace.error("PP_OCR_INIT", null, e)
                     probes.put("pp_ocr_init", JSONObject().put("status", "failed").put("error", ppInitError))
                 }
                 recognizer = TextRecognition.getClient(ChineseTextRecognizerOptions.Builder().build())
@@ -239,6 +250,8 @@ class OcrDiagnosticActivity : ComponentActivity() {
                     val entry = JSONObject().put("variant", name)
                         .put("width", bitmap.width).put("height", bitmap.height)
                     val ppStarted = System.currentTimeMillis()
+                    trace.event("OCR_VARIANT_" + name, "START", details = JSONObject()
+                        .put("width", bitmap.width).put("height", bitmap.height))
                     if (paddle != null) {
                         try {
                             val pp = withContext(Dispatchers.IO) { paddle!!.recognize(bitmap) }
@@ -291,6 +304,9 @@ class OcrDiagnosticActivity : ComponentActivity() {
                         failures.put(JSONObject().put("stage", "ML_KIT_$name").put("error", message))
                     }
                     engineResults.put(entry)
+                    trace.event("OCR_VARIANT_" + name, "COMPLETED", ppStarted,
+                        JSONObject().put("pp_status", entry.optJSONObject("pp_ocr")?.optString("status") ?: "missing")
+                            .put("ml_status", entry.optJSONObject("ml_kit")?.optString("status") ?: "missing"))
                 }
                 probes.put("P3_P4_P5_engine_results", engineResults)
 
@@ -351,11 +367,18 @@ class OcrDiagnosticActivity : ComponentActivity() {
                     .put("platform_reward", "ignored")
                     .put("legacy_regex_note", "legacy regex helper retained; spatial extractor is authoritative")
                 probes.put("P6_parser", parser)
+                trace.event("P6_FREIGHT_PARSER", spatialFareCheck.state, details = JSONObject()
+                    .put("amount", spatialFareCheck.confirmedAmount ?: JSONObject.NULL)
+                    .put("candidate_count", spatialFareCheck.candidates.size)
+                    .put("details", spatialFareCheck.details))
 
                 val diagnosis = classify(ppOriginalText, mlOriginalText, ppFare, mlFare, expectedValue)
                 probes.put("automatic_diagnosis", diagnosis)
                 probes.put("failures", failures)
                 probes.put("elapsed_total_ms", System.currentTimeMillis() - started)
+                trace.finish(if (failures.length() == 0) "SUCCESS" else "COMPLETED_WITH_ERRORS",
+                    JSONObject().put("failure_count", failures.length())
+                        .put("diagnosis", diagnosis).put("fare_state", spatialFareCheck.state))
 
                 val packageInfo = packageManager.getPackageInfo(packageName, 0)
                 val reportJson = JSONObject()
@@ -380,6 +403,7 @@ class OcrDiagnosticActivity : ComponentActivity() {
 
                 withContext(Dispatchers.IO) {
                     File(dir, "diagnostic.json").writeText(reportJson.toString(2), Charsets.UTF_8)
+                    runCatching { File(trace.path()).copyTo(File(dir, "pipeline_trace.jsonl"), overwrite = true) }
                     val textReport = buildString {
                         appendLine("货拉拉盯单助手 OCR 诊断报告")
                         appendLine("测试编号：$id")
@@ -425,6 +449,8 @@ class OcrDiagnosticActivity : ComponentActivity() {
                 status.text = "诊断完成｜耗时 ${System.currentTimeMillis() - started} ms"
                 exportButton.isEnabled = true
             } catch (e: Exception) {
+                trace.error("DIAGNOSTIC_UNHANDLED", null, e)
+                trace.finish("FAILED")
                 val message = e.localizedMessage ?: e.javaClass.simpleName
                 failures.put(JSONObject().put("stage", "UNHANDLED").put("error", message))
                 status.text = "诊断中断：$message"

@@ -11,8 +11,8 @@ android {
         applicationId = "com.dingdan.assistant"
         minSdk = 26
         targetSdk = 35
-        versionCode = 19
-        versionName = "1.3.7-freight-extractor"
+        versionCode = 20
+        versionName = "1.3.8-pipeline-probes"
     }
 
     compileOptions {
