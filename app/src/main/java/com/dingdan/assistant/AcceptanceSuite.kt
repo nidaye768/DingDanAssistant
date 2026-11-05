@@ -104,6 +104,19 @@ object AcceptanceSuite {
         check("订单文本归一化去重", key("  A地  到 B地 ") == key("a地 到 b地"),
             "空格和大小写归一化；正式去重仍需结合报价、地址、备注和视觉轨迹")
 
+        val remarkJson = """{"vehicle_type":"中面","vehicle_length_m":3.0,"vehicle_volume_m3":8.0,"cargo_name":"葱","cargo_weight_kg":2000,"cargo_volume_m3":8.0,"cargo_length_m":3.0,"pickup_count":1,"delivery_count":1,"driver_extra_cost_yuan":null,"extra_cost_items":["高速费承担方未知"],"toll_requirement":"不出高速费","arrival_time":"1点到达","personnel_requirement":"跟车1人","loading_unloading":"托盘装货","risks":["货物重量需核实车辆额定载重"],"unclear_items":["司机是否承担高速费不明确"],"evidence":["车型中面","拉葱2吨","不出高速费"],"summary":"中面运输约2吨葱，费用责任仍需确认"}"""
+        val parsedRemark = OrderRemarkAnalysis.parse(remarkJson)
+        check("备注结构化字段提取", parsedRemark.vehicleType == "中面" &&
+            parsedRemark.cargoWeightKg == 2000.0 && parsedRemark.pickupCount == 1,
+            "车型、货物重量和装货点数量可从结构化JSON读取")
+        check("未知额外成本不按零处理", parsedRemark.driverExtraCostYuan == null &&
+            parsedRemark.unclearItems.isNotEmpty(),
+            "额外成本未知保持null，并保留待确认事项")
+        var malformedRemarkRejected = false
+        try { OrderRemarkAnalysis.parse("模型没有返回JSON") } catch (_: Exception) { malformedRemarkRejected = true }
+        check("无效模型JSON安全拒绝", malformedRemarkRejected,
+            "模型输出不是有效JSON时不生成结构化结果")
+
         check("API 地址格式检查", "https://example.com/v1".startsWith("https://"),
             "HTTPS 地址格式基础检查")
         return out
