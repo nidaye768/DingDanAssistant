@@ -11,7 +11,8 @@ data class OrderRuleConfig(
     val pickupLimit: Int = 1,
     val deliveryMode: CountMode = CountMode.EXACT,
     val deliveryLimit: Int = 1,
-    val countIssueAction: UnknownAction = UnknownAction.PENDING,
+    val mismatchCountAction: UnknownAction = UnknownAction.IGNORE,
+    val unknownCountAction: UnknownAction = UnknownAction.PENDING,
     val maxDriverExtraCostYuan: Double? = null,
     val vehicleType: String = "",
     val vehicleLengthM: Double? = null,
@@ -35,7 +36,8 @@ data class OrderRuleConfig(
             pickupLimit = p.getInt("rule_pickup_limit", 1).coerceAtLeast(1),
             deliveryMode = runCatching { CountMode.valueOf(p.getString("rule_delivery_mode", "EXACT")!!) }.getOrDefault(CountMode.EXACT),
             deliveryLimit = p.getInt("rule_delivery_limit", 1).coerceAtLeast(1),
-            countIssueAction = runCatching { UnknownAction.valueOf(p.getString("rule_count_issue", "PENDING")!!) }.getOrDefault(UnknownAction.PENDING),
+            mismatchCountAction = runCatching { UnknownAction.valueOf(p.getString("rule_mismatch_count", "IGNORE")!!) }.getOrDefault(UnknownAction.IGNORE),
+            unknownCountAction = runCatching { UnknownAction.valueOf(p.getString("rule_unknown_count", "PENDING")!!) }.getOrDefault(UnknownAction.PENDING),
             maxDriverExtraCostYuan = p.getString("rule_max_extra", null)?.toDoubleOrNull()?.takeIf { it >= 0.0 },
             vehicleType = p.getString("vehicle_type", "") ?: "",
             vehicleLengthM = p.getString("vehicle_length", null)?.toDoubleOrNull()?.takeIf { it > 0.0 },
@@ -50,7 +52,8 @@ data class OrderRuleConfig(
                 .putInt("rule_pickup_limit", config.pickupLimit)
                 .putString("rule_delivery_mode", config.deliveryMode.name)
                 .putInt("rule_delivery_limit", config.deliveryLimit)
-                .putString("rule_count_issue", config.countIssueAction.name)
+                .putString("rule_mismatch_count", config.mismatchCountAction.name)
+                .putString("rule_unknown_count", config.unknownCountAction.name)
                 .putString("rule_max_extra", config.maxDriverExtraCostYuan?.toString().orEmpty())
                 .putString("vehicle_type", config.vehicleType)
                 .putString("vehicle_length", config.vehicleLengthM?.toString().orEmpty())
