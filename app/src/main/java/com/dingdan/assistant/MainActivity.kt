@@ -445,7 +445,13 @@ $ocr
                 output.append("\n\nAI备注解析原始响应：\n$answer")
                 if (structured != null) {
                     output.append("\n\n" + structured.toDisplayText())
-                    status.text = "AI备注结构化解析完成｜请核对待确认项"
+                    val vehicleConfig = OrderRuleConfig.load(getSharedPreferences("api_config", MODE_PRIVATE))
+                    val matchReport = OrderRequirementMatcher.evaluate(structured, vehicleConfig)
+                    output.append("\n\n【订单要求与车辆档案匹配】")
+                    output.append("\n车辆匹配状态：" + matchReport.vehicleMatch.name)
+                    matchReport.reasons.forEach { output.append("\n• " + it) }
+                    output.append("\n说明：这只是车辆条件初步匹配；装卸数量、额外成本、实际道路里程和最终规则仍需完整联动。")
+                    status.text = "AI备注解析及车辆初步匹配完成｜请核对待确认项"
                 } else {
                     output.append("\n\n结构化解析失败：模型未按要求返回有效JSON。本次不生成自动接单结论。")
                     status.text = "模型分析完成，但结构化JSON解析失败"
