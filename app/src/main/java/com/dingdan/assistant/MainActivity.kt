@@ -17,6 +17,11 @@ import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import com.dingdan.assistant.vision.OrderCardSegmenter
 import com.dingdan.assistant.vision.YoloOrderDetector
+import com.paddle.ocr.PaddleOCR
+import com.paddle.ocr.util.OpenCVUtils
+import com.google.android.gms.tasks.Task
+import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.text.TextRecognition
 import com.google.mlkit.vision.text.chinese.ChineseTextRecognizerOptions
@@ -43,6 +48,7 @@ class MainActivity : ComponentActivity() {
     private lateinit var model: EditText
     private lateinit var cameraExecutor: ExecutorService
     private var capture: ImageCapture? = null
+    @Volatile private var paddleOcr: PaddleOCR? = null
     private var mode = "auto"
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private val client = OkHttpClient.Builder().connectTimeout(20, TimeUnit.SECONDS)
@@ -194,38 +200,71 @@ class MainActivity : ComponentActivity() {
                     if (bitmap == null) { runOnUiThread { status.text = "图片读取失败" }; return }
                     val segmentation = OrderCardSegmenter.process(bitmap)
                     val yolo = try { YoloOrderDetector.detect(this@MainActivity, bitmap) } catch (e: Exception) { null }
-                    val recognizer = TextRecognition.getClient(ChineseTextRecognizerOptions.Builder().build())
-                    recognizer.process(InputImage.fromBitmap(bitmap, 0))
-                        .addOnSuccessListener { ocr ->
-                            val report = buildString {
-                                appendLine("模式：${if (mode == "fast") "极速" else "全自动"}")
-                                appendLine("OCR 原文：")
-                                appendLine(ocr.text)
-                                appendLine()
-                                if (yolo != null) {
-                                    appendLine("YOLO11n ONNX：本机推理 ${yolo.inferenceMs} ms｜检测框 ${yolo.detections.size} 个")
-                                    yolo.detections.forEachIndexed { i, d ->
-                                        appendLine("YOLO框 ${i + 1}：${d.className}｜置信度 ${"%.1f".format(d.confidence * 100)}%")
-                                    }
-                                } else {
-                                    appendLine("YOLO模型暂不可用：将保留规则分割结果，首次下载模型需联网")
-                                }
-                                appendLine("红色标题栏（规则回退）：${segmentation.headerBands.size} 条")
-                                appendLine("规则卡片：${segmentation.cards.size} 张｜${segmentation.reason}")
-                                segmentation.cards.forEachIndexed { i, card ->
-                                    appendLine("卡片 ${i + 1}：${if (card.isPartialBottom) "底部部分卡片" else "已截取"}｜hash=${"%016x".format(card.perceptualHash)}")
-                                }
-                                appendLine("注意：连点器遮挡区排除、透视校正、连续自动扫描和多信号去重仍需后续实现/验证。")
-                            }
-                            runOnUiThread { output.text = report; status.text = "本地 OCR 与切卡完成" }
-                            requestVision(bitmap, ocr.text)
+                    scope.launch {
+                        status.text = "PP-OCRv6 主引擎识别中…"
+                        var ppDiagnostic = ""
+                        val ppText = try {
+                            withContext(Dispatchers.IO) { recognizeWithPaddle(bitmap).also { ppDiagnostic = it.second }.first }
+                        } catch (e: Exception) {
+                            ppDiagnostic = "PP-OCRv6 主引擎失败：" + (e.localizedMessage ?: e.javaClass.simpleName)
+                            ""
                         }
-                        .addOnFailureListener { e -> runOnUiThread { status.text = "OCR 失败：${e.localizedMessage}" } }
+                        status.text = "ML Kit 辅助校验中…"
+                        val mlKitText = try {
+                            val recognizer = TextRecognition.getClient(ChineseTextRecognizerOptions.Builder().build())
+                            try { recognizer.process(InputImage.fromBitmap(bitmap, 0)).awaitResult().text }
+                            finally { recognizer.close() }
+                        } catch (e: Exception) {
+                            "ML Kit 辅助校验失败：" + (e.localizedMessage ?: e.javaClass.simpleName)
+                        }
+                        val primaryText = ppText.ifBlank { mlKitText }
+                        val report = buildString {
+                            appendLine("模式：${if (mode == "fast") "极速" else "全自动"}")
+                            appendLine("OCR 主引擎：PP-OCRv6")
+                            appendLine(if (ppText.isNotBlank()) "主引擎结果（用于后续分析）：\n$ppText" else "主引擎不可用，临时回退 ML Kit；本次结果需谨慎使用。")
+                            appendLine("\nPP-OCRv6 运行信息：$ppDiagnostic")
+                            appendLine("\nML Kit 辅助校验结果：\n$mlKitText")
+                            appendLine()
+                            if (yolo != null) {
+                                appendLine("YOLO11n ONNX：本机推理 ${yolo.inferenceMs} ms｜检测框 ${yolo.detections.size} 个")
+                                yolo.detections.forEachIndexed { i, d ->
+                                    appendLine("YOLO框 ${i + 1}：${d.className}｜置信度 ${"%.1f".format(d.confidence * 100)}%")
+                                }
+                            } else appendLine("YOLO模型暂不可用：保留规则分割结果")
+                            appendLine("红色标题栏（规则回退）：${segmentation.headerBands.size} 条")
+                            appendLine("规则卡片：${segmentation.cards.size} 张｜${segmentation.reason}")
+                            segmentation.cards.forEachIndexed { i, card ->
+                                appendLine("卡片 ${i + 1}：${if (card.isPartialBottom) "底部部分卡片" else "已截取"}｜hash=${"%016x".format(card.perceptualHash)}")
+                            }
+                            appendLine("\n说明：PP-OCRv6 是主识别结果；ML Kit 只用于对照，不覆盖主结果。若关键数字或地址存在冲突，后续字段提取应标记待确认。")
+                            appendLine("本Demo不自动抢单。")
+                        }
+                        output.text = report
+                        status.text = if (ppText.isNotBlank()) "PP-OCRv6 主识别完成，ML Kit 辅助校验完成" else "PP-OCRv6失败，已回退ML Kit（需人工确认）"
+                        if (primaryText.isNotBlank()) requestVision(bitmap, primaryText)
+                    }
                 }
                 override fun onError(e: ImageCaptureException) {
                     runOnUiThread { status.text = "拍摄失败：${e.localizedMessage}" }
                 }
             })
+    }
+
+    private fun recognizeWithPaddle(bitmap: Bitmap): Pair<String, String> {
+        val engine = paddleOcr ?: run {
+            System.loadLibrary("opencv_java4")
+            check(OpenCVUtils.init(this)) { "OpenCVUtils 初始化失败" }
+            PaddleOCR.create(this).also { paddleOcr = it }
+        }
+        val result = engine.recognize(bitmap)
+        val text = result.results.joinToString("\n") { it.text }.trim()
+        val details = "模型已加载｜检测 ${result.detectionTimeMs}ms｜识别 ${result.recognitionTimeMs}ms｜总计 ${result.totalTimeMs}ms｜文本行 ${result.lineCount}"
+        return text to details
+    }
+
+    private suspend fun <T> Task<T>.awaitResult(): T = kotlinx.coroutines.suspendCancellableCoroutine { c ->
+        addOnSuccessListener { if (c.isActive) c.resume(it) }
+        addOnFailureListener { if (c.isActive) c.resumeWithException(it) }
     }
 
     private fun runSelfTests() {
@@ -319,6 +358,8 @@ class MainActivity : ComponentActivity() {
     override fun onDestroy() {
         super.onDestroy()
         scope.cancel()
+        try { paddleOcr?.release() } catch (_: Exception) { }
+        paddleOcr = null
         cameraExecutor.shutdown()
     }
 }
