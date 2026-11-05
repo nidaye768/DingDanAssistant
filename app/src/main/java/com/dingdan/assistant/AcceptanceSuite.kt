@@ -120,7 +120,8 @@ object AcceptanceSuite {
         val cleanRemark = OrderRemarkAnalysis(
             vehicleType = "中面", vehicleLengthM = 3.0, vehicleVolumeM3 = null,
             cargoName = "电子产品", cargoWeightKg = 800.0, cargoVolumeM3 = 5.0,
-            cargoLengthM = null, pickupCount = 1, deliveryCount = 1,
+            cargoLengthM = null, freightYuan = null, extraRewardYuan = null,
+            pickupCount = 1, deliveryCount = 1,
             driverExtraCostYuan = 0.0, extraCostItems = emptyList(),
             tollRequirement = null, arrivalTime = null, personnelRequirement = null,
             loadingUnloading = "普通装卸", risks = emptyList(), unclearItems = emptyList(),
