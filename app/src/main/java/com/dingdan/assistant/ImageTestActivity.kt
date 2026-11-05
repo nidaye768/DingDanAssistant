@@ -255,6 +255,7 @@ class ImageTestActivity : ComponentActivity() {
             try {
                 report.appendLine("测试类型：" + kind)
                 report.appendLine("时间：" + formatTime(started))
+                report.appendLine("OCR策略：PP-OCRv6 主引擎｜ML Kit 辅助对照；测试页保留双引擎原始结果。")
                 if (note.isNotBlank()) report.appendLine(note)
                 try {
                     // Load the native library directly first so Android's real linker error is preserved.
@@ -285,8 +286,9 @@ class ImageTestActivity : ComponentActivity() {
                     } catch (e: Exception) {
                         failures++; report.appendLine("OCR失败：" + e.localizedMessage); ""
                     }
-                    report.appendLine("【ML Kit 中文 OCR】")
+                    report.appendLine("【ML Kit 中文 OCR｜辅助校验，不覆盖主引擎】")
                     report.appendLine("原始文本：\n" + if (text.isBlank()) "（无文字）" else text)
+                    var ppPrimaryText = ""
                     try {
                         val pp = paddle
                         if (pp == null) {
@@ -294,7 +296,9 @@ class ImageTestActivity : ComponentActivity() {
                         } else {
                             status.text = "正在运行 PP-OCRv6：第 ${index + 1}/${targets.size} 个区域…"
                             val ppResult = pp.recognize(bitmap)
-                            report.appendLine("\n【PP-OCRv6】")
+                            ppPrimaryText = ppResult.results.joinToString("\\n") { it.text }.trim()
+                            report.appendLine("\n【PP-OCRv6｜主引擎结果】")
+                            report.appendLine("主引擎提取文本：\\n" + if (ppPrimaryText.isBlank()) "（无文字）" else ppPrimaryText)
                             report.appendLine("文本行数：${ppResult.lineCount}")
                             report.appendLine("检测耗时：${ppResult.detectionTimeMs} ms（预处理 ${ppResult.detPreprocessMs} / 推理 ${ppResult.detInferenceMs} / 后处理 ${ppResult.detPostprocessMs} ms）")
                             report.appendLine("识别耗时：${ppResult.recognitionTimeMs} ms（预处理 ${ppResult.recPreprocessMs} / 推理 ${ppResult.recInferenceMs} / 后处理 ${ppResult.recPostprocessMs} ms）")
@@ -309,11 +313,12 @@ class ImageTestActivity : ComponentActivity() {
                         failures++
                         report.appendLine("\n【PP-OCRv6】识别失败：" + (e.localizedMessage ?: e.javaClass.simpleName))
                     }
-                    output.text = report.toString() + "\n\n当前进度：双引擎 OCR 已运行，正在继续处理…"
-                    if (base.isNotBlank() && key.isNotBlank() && model.isNotBlank() && text.isNotBlank()) {
+                    output.text = report.toString() + "\n\n当前进度：PP-OCRv6 主识别及 ML Kit 辅助对照已运行…"
+                    val visionOcrText = ppPrimaryText.ifBlank { text }
+                    if (base.isNotBlank() && key.isNotBlank() && model.isNotBlank() && visionOcrText.isNotBlank()) {
                         try {
                             status.text = "正在调用视觉模型复核：第 ${index + 1}/${targets.size} 个区域…"
-                            val answer = withContext(Dispatchers.IO) { askVision(base, key, model, bitmap, text) }
+                            val answer = withContext(Dispatchers.IO) { askVision(base, key, model, bitmap, visionOcrText) }
                             report.appendLine("\n视觉模型分析：\n" + answer)
                         } catch (e: Exception) {
                             failures++; report.appendLine("\n模型调用失败：" + e.localizedMessage)
