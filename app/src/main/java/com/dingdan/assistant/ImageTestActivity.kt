@@ -296,9 +296,9 @@ class ImageTestActivity : ComponentActivity() {
                         } else {
                             status.text = "正在运行 PP-OCRv6：第 ${index + 1}/${targets.size} 个区域…"
                             val ppResult = pp.recognize(bitmap)
-                            ppPrimaryText = ppResult.results.joinToString("\\n") { it.text }.trim()
+                            ppPrimaryText = ppResult.results.joinToString("\n") { it.text }.trim()
                             report.appendLine("\n【PP-OCRv6｜主引擎结果】")
-                            report.appendLine("主引擎提取文本：\\n" + if (ppPrimaryText.isBlank()) "（无文字）" else ppPrimaryText)
+                            report.appendLine("主引擎提取文本：\n" + if (ppPrimaryText.isBlank()) "（无文字）" else ppPrimaryText)
                             report.appendLine("文本行数：${ppResult.lineCount}")
                             report.appendLine("检测耗时：${ppResult.detectionTimeMs} ms（预处理 ${ppResult.detPreprocessMs} / 推理 ${ppResult.detInferenceMs} / 后处理 ${ppResult.detPostprocessMs} ms）")
                             report.appendLine("识别耗时：${ppResult.recognitionTimeMs} ms（预处理 ${ppResult.recPreprocessMs} / 推理 ${ppResult.recInferenceMs} / 后处理 ${ppResult.recPostprocessMs} ms）")
