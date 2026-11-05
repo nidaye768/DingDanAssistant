@@ -17,6 +17,8 @@ import androidx.activity.ComponentActivity
 import androidx.activity.result.contract.ActivityResultContracts
 import com.dingdan.assistant.vision.OrderCardSegmenter
 import com.dingdan.assistant.vision.YoloOrderDetector
+import com.paddle.ocr.PaddleOCR
+import com.paddle.ocr.util.OpenCVUtils
 import com.google.android.gms.tasks.Task
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.text.TextRecognition
@@ -252,6 +254,16 @@ class ImageTestActivity : ComponentActivity() {
                 report.appendLine("时间：" + formatTime(started))
                 if (note.isNotBlank()) report.appendLine(note)
                 val recognizer = TextRecognition.getClient(ChineseTextRecognizerOptions.Builder().build())
+                var paddle: PaddleOCR? = null
+                var paddleInitError = ""
+                try {
+                    check(OpenCVUtils.init(this@ImageTestActivity)) { "OpenCV 原生库初始化失败" }
+                    paddle = PaddleOCR.create(this@ImageTestActivity)
+                    report.appendLine("PP-OCRv6 初始化：成功｜模型加载耗时 ${paddle.coldLoadTimeMs} ms")
+                } catch (e: Exception) {
+                    paddleInitError = e.localizedMessage ?: e.javaClass.simpleName
+                    report.appendLine("PP-OCRv6 初始化失败：$paddleInitError")
+                }
                 val prefs = getSharedPreferences("api_config", MODE_PRIVATE)
                 val base = prefs.getString("base", "").orEmpty().trim().trimEnd('/')
                 val key = prefs.getString("key", "").orEmpty().trim()
@@ -266,8 +278,31 @@ class ImageTestActivity : ComponentActivity() {
                     } catch (e: Exception) {
                         failures++; report.appendLine("OCR失败：" + e.localizedMessage); ""
                     }
-                    report.appendLine("OCR原始文本：\n" + if (text.isBlank()) "（无文字）" else text)
-                    output.text = report.toString() + "\n\n当前进度：OCR已完成，正在继续处理…"
+                    report.appendLine("【ML Kit 中文 OCR】")
+                    report.appendLine("原始文本：\n" + if (text.isBlank()) "（无文字）" else text)
+                    try {
+                        val pp = paddle
+                        if (pp == null) {
+                            report.appendLine("\n【PP-OCRv6】不可用：$paddleInitError")
+                        } else {
+                            status.text = "正在运行 PP-OCRv6：第 ${index + 1}/${targets.size} 个区域…"
+                            val ppResult = pp.recognize(bitmap)
+                            report.appendLine("\n【PP-OCRv6】")
+                            report.appendLine("文本行数：${ppResult.lineCount}")
+                            report.appendLine("检测耗时：${ppResult.detectionTimeMs} ms（预处理 ${ppResult.detPreprocessMs} / 推理 ${ppResult.detInferenceMs} / 后处理 ${ppResult.detPostprocessMs} ms）")
+                            report.appendLine("识别耗时：${ppResult.recognitionTimeMs} ms（预处理 ${ppResult.recPreprocessMs} / 推理 ${ppResult.recInferenceMs} / 后处理 ${ppResult.recPostprocessMs} ms）")
+                            report.appendLine("总耗时：${ppResult.totalTimeMs} ms")
+                            ppResult.results.forEachIndexed { lineIndex, line ->
+                                val points = line.box.points.joinToString(" ") { point -> "(${point.x.toInt()},${point.y.toInt()})" }
+                                report.appendLine("行 ${lineIndex + 1}｜置信度 ${"%.1f".format(line.confidence * 100)}%｜坐标 $points｜文本：${line.text}")
+                            }
+                            if (ppResult.results.isEmpty()) report.appendLine("（未检测到文字行）")
+                        }
+                    } catch (e: Exception) {
+                        failures++
+                        report.appendLine("\n【PP-OCRv6】识别失败：" + (e.localizedMessage ?: e.javaClass.simpleName))
+                    }
+                    output.text = report.toString() + "\n\n当前进度：双引擎 OCR 已运行，正在继续处理…"
                     if (base.isNotBlank() && key.isNotBlank() && model.isNotBlank() && text.isNotBlank()) {
                         try {
                             status.text = "正在调用视觉模型复核：第 ${index + 1}/${targets.size} 个区域…"
@@ -297,7 +332,11 @@ class ImageTestActivity : ComponentActivity() {
             catch (e: Exception) {
                 status.text = "处理失败：" + e.localizedMessage
                 output.text = report.toString() + "\n异常：" + e.localizedMessage
-            } finally { setBusy(false) }
+            } finally {
+                try { paddle?.release() } catch (_: Exception) { }
+                try { recognizer.close() } catch (_: Exception) { }
+                setBusy(false)
+            }
         }
     }
 
