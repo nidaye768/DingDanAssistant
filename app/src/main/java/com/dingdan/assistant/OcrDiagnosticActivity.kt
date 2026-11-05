@@ -308,8 +308,10 @@ class OcrDiagnosticActivity : ComponentActivity() {
                     val ml = item.optJSONObject("ml_kit")
                     val ppText = pp?.optString("recognized_text", "").orEmpty()
                     val mlText = ml?.optString("recognized_text", "").orEmpty()
-                    val ppValue = if (pp?.optString("status") == "success") extractAmount(ppText, "用户出价") else null
-                    val mlValue = if (ml?.optString("status") == "success") extractAmount(mlText, "用户出价") else null
+                    val ppCandidate = FreightAmountExtractor.fromDiagnosticPp(pp, variant)
+                    val mlCandidate = FreightAmountExtractor.fromDiagnosticMl(ml, variant)
+                    val ppValue = ppCandidate?.amount
+                    val mlValue = mlCandidate?.amount
                     variantParsers.put(JSONObject()
                         .put("image_variant", variant)
                         .put("pp_ocr_status", pp?.optString("status") ?: "missing")
@@ -326,15 +328,28 @@ class OcrDiagnosticActivity : ComponentActivity() {
                     }
                 }
                 val expectedValue = expected.text.toString().trim().toDoubleOrNull()
+                val spatialCandidates = mutableListOf<FreightAmountExtractor.Candidate?>()
+                for (i in 0 until engineResults.length()) {
+                    val item = engineResults.optJSONObject(i) ?: continue
+                    val variant = item.optString("variant", "unknown")
+                    if (variant != "original" && variant != "upscale_2x") continue
+                    spatialCandidates += FreightAmountExtractor.fromDiagnosticPp(item.optJSONObject("pp_ocr"), variant)
+                    spatialCandidates += FreightAmountExtractor.fromDiagnosticMl(item.optJSONObject("ml_kit"), variant)
+                }
+                val spatialFareCheck = FreightAmountExtractor.resolve(spatialCandidates)
                 val parser = JSONObject()
                     .put("target_field", "freight_yuan")
                     .put("expected_value", expectedValue ?: JSONObject.NULL)
-                    .put("primary_image_variant", "original")
+                    .put("primary_image_variant", "original+upscale_2x spatial consensus")
+                    .put("spatial_extraction_state", spatialFareCheck.state)
+                    .put("spatial_extraction_amount_yuan", spatialFareCheck.confirmedAmount ?: JSONObject.NULL)
+                    .put("spatial_extraction_details", spatialFareCheck.details)
                     .put("pp_ocr_freight_yuan", ppFare ?: JSONObject.NULL)
                     .put("ml_kit_freight_yuan", mlFare ?: JSONObject.NULL)
                     .put("variant_results", variantParsers)
                     .put("regex", "用户出价[\\s:：¥￥]*([0-9]{1,7}(?:[.．][0-9]{1,2})?)")
                     .put("platform_reward", "ignored")
+                    .put("legacy_regex_note", "legacy regex helper retained; spatial extractor is authoritative")
                 probes.put("P6_parser", parser)
 
                 val diagnosis = classify(ppOriginalText, mlOriginalText, ppFare, mlFare, expectedValue)
@@ -372,7 +387,10 @@ class OcrDiagnosticActivity : ComponentActivity() {
                         appendLine("设备：${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL} / Android ${android.os.Build.VERSION.RELEASE}")
                         appendLine("目标字段：freight_yuan")
                         appendLine("预期运费：${expectedValue ?: "未填写"}")
-                        appendLine("自动诊断（仅原图）：$diagnosis")
+                        appendLine("自动诊断（原图）：$diagnosis")
+                        appendLine("空间金额提取状态：" + spatialFareCheck.state)
+                        appendLine("空间金额提取结果：" + (spatialFareCheck.confirmedAmount?.toString() ?: "待确认"))
+                        appendLine("空间金额证据：" + spatialFareCheck.details)
                         appendLine("PP-OCR 提取用户出价：${ppFare ?: "未提取"}")
                         appendLine("ML Kit 提取用户出价：${mlFare ?: "未提取"}")
                         appendLine("总耗时：${System.currentTimeMillis() - started} ms")
@@ -396,6 +414,8 @@ class OcrDiagnosticActivity : ComponentActivity() {
                 result.text = buildString {
                     appendLine("测试编号：$id")
                     appendLine("自动诊断：$diagnosis")
+                    appendLine("空间金额提取状态：" + spatialFareCheck.state)
+                    appendLine("空间金额提取结果：" + (spatialFareCheck.confirmedAmount?.toString() ?: "待确认"))
                     appendLine("PP-OCR 用户出价：${ppFare ?: "未提取"}")
                     appendLine("ML Kit 用户出价：${mlFare ?: "未提取"}")
                     appendLine()

@@ -318,25 +318,59 @@ class MainActivity : ComponentActivity() {
                             val usableMlKitText = mlKitResult?.text.orEmpty()
                             val ppLineEvidence = ppDiagnostic.substringAfter("文字行证据：", "")
                             val mlLineEvidence = mlKitResult?.let { serializeMlKitEvidence(it) } ?: "{}"
+                            val twoX = Bitmap.createScaledBitmap(orderBitmap, orderBitmap.width * 2, orderBitmap.height * 2, true)
+                            var pp2xText = ""
+                            var pp2xEvidence = ""
+                            val pp2xError = try {
+                                withContext(Dispatchers.IO) {
+                                    recognizeWithPaddle(twoX).also { pp2xEvidence = it.second }.first
+                                }
+                                ""
+                            } catch (e: Exception) { e.localizedMessage ?: e.javaClass.simpleName }
+                            var ml2xText = ""
+                            var ml2xEvidence = "{}"
+                            val ml2xError = try {
+                                val recognizer2x = TextRecognition.getClient(ChineseTextRecognizerOptions.Builder().build())
+                                try {
+                                    val result2x = recognizer2x.process(InputImage.fromBitmap(twoX, 0)).awaitResult()
+                                    ml2xText = result2x.text
+                                    ml2xEvidence = serializeMlKitEvidence(result2x)
+                                } finally { recognizer2x.close() }
+                                ""
+                            } catch (e: Exception) { e.localizedMessage ?: e.javaClass.simpleName }
+                            twoX.recycle()
+                            val fareCheck = FreightAmountExtractor.resolve(listOf(
+                                FreightAmountExtractor.fromPp(ppText, ppLineEvidence, "original", "PP-OCR"),
+                                FreightAmountExtractor.fromMl(mlLineEvidence, "original", "ML Kit"),
+                                FreightAmountExtractor.fromPp(pp2xText, pp2xEvidence.substringAfter("文字行证据：", ""), "upscale_2x", "PP-OCR"),
+                                FreightAmountExtractor.fromMl(ml2xEvidence, "upscale_2x", "ML Kit")
+                            ))
                             val ocrEvidence = buildString {
-                                appendLine("【PP-OCRv6原始识别】")
+                                appendLine("【原图 PP-OCRv6】")
                                 appendLine(if (ppText.isBlank()) "（无有效文本）" else ppText)
-                                appendLine("【PP-OCRv6文字框/置信度】")
                                 appendLine(ppLineEvidence)
-                                appendLine("【ML Kit原始识别】")
+                                appendLine("【原图 ML Kit】")
                                 appendLine(if (usableMlKitText.isBlank()) "（无有效文本）" else usableMlKitText)
-                                appendLine("【ML Kit文字框/置信度】")
                                 appendLine(mlLineEvidence)
+                                appendLine("【2倍图 PP-OCRv6】")
+                                appendLine(if (pp2xText.isBlank()) "（无有效文本）" else pp2xText)
+                                appendLine(pp2xEvidence)
+                                appendLine("【2倍图 ML Kit】")
+                                appendLine(if (ml2xText.isBlank()) "（无有效文本）" else ml2xText)
+                                appendLine(ml2xEvidence)
+                                appendLine("【本地运费候选核验】")
+                                appendLine(fareCheck.details)
+                                appendLine("2倍图错误：PP=" + pp2xError + "；ML=" + ml2xError)
                             }.trim()
                             report.appendLine("PP-OCRv6主引擎：\n" + if (ppText.isBlank()) "无有效文本" else ppText)
                             report.appendLine("PP-OCRv6运行信息：$ppDiagnostic")
-                            report.appendLine("ML Kit辅助校验：\n" + if (mlKitError.isBlank()) usableMlKitText else "失败：$mlKitError")
-                            report.appendLine("ML Kit文字框证据：$mlLineEvidence")
-                            if (ppText.isNotBlank() || usableMlKitText.isNotBlank()) {
-                                status.text = "完整订单 ${index + 1}/${complete.size}：提交双引擎证据供 AI 对照…"
-                                requestVision(orderBitmap, ocrEvidence)
-                                report.appendLine("已提交原图 + PP-OCRv6 + ML Kit 双引擎文本，供 AI 交叉核对（只针对 YOLO class 0 完整订单）")
-                            } else report.appendLine("两套OCR均为空：跳过AI调用")
+                            report.appendLine("ML Kit辅助校验：\n" + if (mlKitError.isBlank()) usableMlKitText else "失败：" + mlKitError)
+                            report.appendLine("本地运费核验：" + fareCheck.details)
+                            if (ppText.isNotBlank() || usableMlKitText.isNotBlank() || pp2xText.isNotBlank() || ml2xText.isNotBlank()) {
+                                status.text = "完整订单 " + (index + 1) + "/" + complete.size + "：提交四路 OCR 证据供 AI 对照…"
+                                requestVision(orderBitmap, ocrEvidence, fareCheck)
+                                report.appendLine("已提交原图 + 2倍图、PP-OCRv6 + ML Kit 证据供 AI 对照；运费由本地核验结果约束")
+                            } else report.appendLine("四路OCR均为空：跳过AI调用")
                             output.text = report.toString()
                         }
                         status.text = "完整订单识别完成：${complete.size} 张｜部分订单已跳过"
@@ -434,7 +468,7 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun requestVision(bitmap: Bitmap, ocr: String) {
+    private fun requestVision(bitmap: Bitmap, ocr: String, fareCheck: FreightAmountExtractor.Result) {
         val base = apiBase.text.toString().trim().trimEnd('/')
         val key = apiKey.text.toString().trim()
         val modelName = model.text.toString().trim()
@@ -499,10 +533,11 @@ $ocr
                             .getJSONObject("message").optString("content", raw)
                     }
                 }
-                val structured = try { OrderRemarkAnalysis.parse(answer) } catch (_: Exception) { null }
+                val parsed = try { OrderRemarkAnalysis.parse(answer) } catch (_: Exception) { null }
+                val structured = parsed?.copy(freightYuan = fareCheck.confirmedAmount)
                 output.append("\n\nAI备注解析原始响应：\n$answer")
                 if (structured != null) {
-                    output.append("\n\n" + structured.toDisplayText())
+                    output.append("\n\n本地运费核验：" + fareCheck.details + "\n" + structured.toDisplayText())
                     val vehicleConfig = OrderRuleConfig.load(getSharedPreferences("api_config", MODE_PRIVATE))
                     val matchReport = OrderRequirementMatcher.evaluate(structured, vehicleConfig)
                     output.append("\n\n【订单要求与车辆档案匹配】")

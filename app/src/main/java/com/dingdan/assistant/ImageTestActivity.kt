@@ -301,7 +301,7 @@ class ImageTestActivity : ComponentActivity() {
                             ppPrimaryText = ppResult.results.joinToString("\n") { it.text }.trim()
                             ppPrimaryEvidence = ppResult.results.joinToString("\n") { line ->
                                 val points = line.box.points.joinToString(" ") { "(${it.x.toInt()},${it.y.toInt()})" }
-                                "文本=${line.text}｜置信度=${"%.3f".format(Locale.US, line.confidence)}｜坐标=$points"
+                                "text=" + line.text + "; confidence=" + "%.3f".format(Locale.US, line.confidence) + "; points=" + points
                             }
                             report.appendLine("\n【PP-OCRv6｜主引擎结果】")
                             report.appendLine("主引擎提取文本：\n" + if (ppPrimaryText.isBlank()) "（无文字）" else ppPrimaryText)
@@ -319,26 +319,62 @@ class ImageTestActivity : ComponentActivity() {
                         failures++
                         report.appendLine("\n【PP-OCRv6】识别失败：" + (e.localizedMessage ?: e.javaClass.simpleName))
                     }
-                    output.text = report.toString() + "\n\n当前进度：PP-OCRv6 主识别及 ML Kit 辅助对照已运行…"
+                    val twoX = Bitmap.createScaledBitmap(bitmap, bitmap.width * 2, bitmap.height * 2, true)
+                    var pp2xText = ""
+                    var pp2xEvidence = ""
+                    val pp2xError = try {
+                        val pp = paddle ?: throw IllegalStateException(paddleInitError.ifBlank { "PP-OCR未初始化" })
+                        val result2x = pp.recognize(twoX)
+                        pp2xText = result2x.results.joinToString("\n") { row -> row.text }.trim()
+                        pp2xEvidence = result2x.results.joinToString(" || ") { row ->
+                            val points = row.box.points.joinToString(" ") { point -> "(" + point.x.toInt() + "," + point.y.toInt() + ")" }
+                            "text=" + row.text + "; confidence=" + "%.3f".format(Locale.US, row.confidence) + "; points=" + points
+                        }
+                        ""
+                    } catch (e: Exception) { e.localizedMessage ?: e.javaClass.simpleName }
+                    var ml2xText = ""
+                    var ml2xEvidence = "{}"
+                    val ml2xError = try {
+                        val result2x = recognizer.process(InputImage.fromBitmap(twoX, 0)).awaitResult()
+                        ml2xText = result2x.text
+                        ml2xEvidence = serializeMlKitEvidence(result2x)
+                        ""
+                    } catch (e: Exception) { e.localizedMessage ?: e.javaClass.simpleName }
+                    twoX.recycle()
+                    val fareCheck = FreightAmountExtractor.resolve(listOf(
+                        FreightAmountExtractor.fromPp(ppPrimaryText, ppPrimaryEvidence, "original", "PP-OCR"),
+                        FreightAmountExtractor.fromMl(mlKitEvidence, "original", "ML Kit"),
+                        FreightAmountExtractor.fromPp(pp2xText, pp2xEvidence, "upscale_2x", "PP-OCR"),
+                        FreightAmountExtractor.fromMl(ml2xEvidence, "upscale_2x", "ML Kit")
+                    ))
+                    output.text = report.toString() + "\n\n当前进度：四路 OCR 金额核验已运行…"
                     val visionOcrText = buildString {
-                        appendLine("【PP-OCRv6原始识别】")
+                        appendLine("【原图 PP-OCRv6】")
                         appendLine(if (ppPrimaryText.isBlank()) "（无有效文本）" else ppPrimaryText)
-                        appendLine("【PP-OCRv6文字框/置信度】")
                         appendLine(ppPrimaryEvidence)
-                        appendLine("【ML Kit原始识别】")
+                        appendLine("【原图 ML Kit】")
                         appendLine(if (text.isBlank()) "（无有效文本）" else text)
-                        appendLine("【ML Kit文字框/置信度】")
                         appendLine(mlKitEvidence)
+                        appendLine("【2倍图 PP-OCRv6】")
+                        appendLine(pp2xText)
+                        appendLine(pp2xEvidence)
+                        appendLine("【2倍图 ML Kit】")
+                        appendLine(ml2xText)
+                        appendLine(ml2xEvidence)
+                        appendLine("【本地运费核验】")
+                        appendLine(fareCheck.details)
+                        appendLine("2倍图错误：PP=" + pp2xError + "；ML=" + ml2xError)
                     }.trim()
                     if (base.isNotBlank() && key.isNotBlank() && model.isNotBlank() &&
-                        (ppPrimaryText.isNotBlank() || text.isNotBlank())) {
+                        (ppPrimaryText.isNotBlank() || text.isNotBlank() || pp2xText.isNotBlank() || ml2xText.isNotBlank())) {
                         try {
-                            status.text = "正在调用视觉模型复核：第 ${index + 1}/${targets.size} 个区域…"
-                            val answer = withContext(Dispatchers.IO) { askVision(base, key, model, bitmap, visionOcrText) }
-                            val structured = try { OrderRemarkAnalysis.parse(answer) } catch (_: Exception) { null }
+                            status.text = "正在调用视觉模型复核：第 " + (index + 1) + "/" + targets.size + " 个区域…"
+                            val answer = withContext(Dispatchers.IO) { askVision(base, key, model, bitmap, visionOcrText, fareCheck) }
+                            val parsed = try { OrderRemarkAnalysis.parse(answer) } catch (_: Exception) { null }
+                            val structured = parsed?.copy(freightYuan = fareCheck.confirmedAmount)
                             report.appendLine("\nAI备注解析原始响应：\n" + answer)
                             if (structured != null) {
-                                report.appendLine("\n" + structured.toDisplayText())
+                                report.appendLine("\n本地运费核验：" + fareCheck.details + "\n" + structured.toDisplayText())
                                 val vehicleConfig = OrderRuleConfig.load(getSharedPreferences("api_config", MODE_PRIVATE))
                                 val matchReport = OrderRequirementMatcher.evaluate(structured, vehicleConfig)
                                 report.appendLine("\n【订单要求与车辆档案匹配】")
@@ -395,7 +431,7 @@ class ImageTestActivity : ComponentActivity() {
         return JSONObject().put("recognized_text", text.text).put("blocks", blocks).toString()
     }
 
-    private suspend fun askVision(base: String, key: String, model: String, bitmap: Bitmap, ocr: String): String {
+    private suspend fun askVision(base: String, key: String, model: String, bitmap: Bitmap, ocr: String, fareCheck: FreightAmountExtractor.Result): String {
         val encoded = withContext(Dispatchers.Default) {
             val scaled = if (bitmap.width > 1600 || bitmap.height > 1600) {
                 val ratio = minOf(1600f / bitmap.width, 1600f / bitmap.height)
