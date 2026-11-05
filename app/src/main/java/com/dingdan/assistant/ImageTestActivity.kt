@@ -153,6 +153,7 @@ class ImageTestActivity : ComponentActivity() {
                 require(bmp.width >= 100 && bmp.height >= 100) { "图片尺寸过小" }
                 source?.recycle(); source = bmp
                 preview.setBitmap(bmp)
+                preview.setDetections(emptyList())
                 output.text = "图片载入成功：" + bmp.width + " × " + bmp.height + "\n请选择自动分割或手动框选识别。"
                 status.text = "图片载入成功"
             } catch (e: Exception) { status.text = "图片读取失败：" + e.localizedMessage }
@@ -200,6 +201,7 @@ class ImageTestActivity : ComponentActivity() {
                 }
                 if (yolo != null && yolo.detections.isNotEmpty()) {
                     val detections = yolo.detections.take(8)
+                    preview.setDetections(detections)
                     val targets = detections.map { YoloOrderDetector.crop(bitmap, it) }
                     val note = buildString {
                         appendLine("检测引擎：YOLO11n ONNX（本机推理）")
@@ -207,12 +209,13 @@ class ImageTestActivity : ComponentActivity() {
                         appendLine("推理耗时：${yolo.inferenceMs} ms")
                         appendLine("检测框数量：${yolo.detections.size}")
                         detections.forEachIndexed { index, item ->
-                            appendLine("框 ${index + 1}：${item.className}｜置信度 ${"%.1f".format(item.confidence * 100)}%")
+                            appendLine("框 ${index + 1}：${item.className}｜置信度 ${"%.1f".format(item.confidence * 100)}%｜位置 x=${"%.3f".format(item.left)}, y=${"%.3f".format(item.top)}, w=${"%.3f".format(item.right-item.left)}, h=${"%.3f".format(item.bottom-item.top)}")
                         }
                         appendLine("本轮最多处理前8个检测框；部分露出卡片会单独标记，不直接视为完整订单。")
                     }
                     runPipeline(targets, "YOLO 自动检测（${targets.size}张）", bitmap, note)
                 } else {
+                    preview.setDetections(emptyList())
                     val result = withContext(Dispatchers.Default) {
                         OrderCardSegmenter.process(bitmap, OrderCardSegmenter.Config(
                             screenRoi = OrderCardSegmenter.NormalizedRect(0f, 0f, 1f, 1f)
@@ -371,6 +374,20 @@ private class CropSelectionView(context: android.content.Context) : View(context
         strokeWidth = 4f * resources.displayMetrics.density
     }
     private val fillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = 0x55333333; style = Paint.Style.FILL }
+    private val detectionGreen = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = 0xFF20B45A.toInt(); style = Paint.Style.STROKE
+        strokeWidth = 3f * resources.displayMetrics.density
+    }
+    private val detectionOrange = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = 0xFFFF9800.toInt(); style = Paint.Style.STROKE
+        strokeWidth = 3f * resources.displayMetrics.density
+    }
+    private val labelText = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = android.graphics.Color.WHITE; textSize = 12f * resources.displayMetrics.scaledDensity
+        typeface = android.graphics.Typeface.DEFAULT_BOLD
+    }
+    private val labelBg = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
+    private var detections: List<YoloOrderDetector.Detection> = emptyList()
     private var bitmap: Bitmap? = null
     private val imageRect = RectF()
     private val selection = RectF()
@@ -378,7 +395,8 @@ private class CropSelectionView(context: android.content.Context) : View(context
     private var startY = 0f
     private var selecting = false
 
-    fun setBitmap(b: Bitmap) { bitmap = b; selection.setEmpty(); selecting = false; invalidate() }
+    fun setBitmap(b: Bitmap) { bitmap = b; detections = emptyList(); selection.setEmpty(); selecting = false; invalidate() }
+    fun setDetections(items: List<YoloOrderDetector.Detection>) { detections = items; invalidate() }
     fun beginSelection() { selection.setEmpty(); selecting = true; invalidate() }
 
     override fun onDraw(canvas: Canvas) {
@@ -389,6 +407,24 @@ private class CropSelectionView(context: android.content.Context) : View(context
         val l = (width - w) / 2f; val t = (height - h) / 2f
         imageRect.set(l, t, l + w, t + h)
         canvas.drawBitmap(b, null, imageRect, imagePaint)
+        detections.forEach { detection ->
+            val rect = RectF(
+                imageRect.left + detection.left * imageRect.width(),
+                imageRect.top + detection.top * imageRect.height(),
+                imageRect.left + detection.right * imageRect.width(),
+                imageRect.top + detection.bottom * imageRect.height()
+            )
+            val paint = if (detection.classId == 0) detectionGreen else detectionOrange
+            canvas.drawRect(rect, paint)
+            val label = "${if (detection.classId == 0) "完整订单" else "部分露出"} ${"%.1f".format(detection.confidence * 100)}%"
+            val textWidth = labelText.measureText(label)
+            val labelTop = (rect.top - 24f * resources.displayMetrics.density).coerceAtLeast(imageRect.top)
+            labelBg.color = paint.color
+            canvas.drawRect(rect.left, labelTop, rect.left + textWidth + 12f * resources.displayMetrics.density,
+                labelTop + 22f * resources.displayMetrics.density, labelBg)
+            canvas.drawText(label, rect.left + 6f * resources.displayMetrics.density,
+                labelTop + 16f * resources.displayMetrics.density, labelText)
+        }
         if (!selection.isEmpty) { canvas.drawRect(selection, fillPaint); canvas.drawRect(selection, borderPaint) }
     }
 
