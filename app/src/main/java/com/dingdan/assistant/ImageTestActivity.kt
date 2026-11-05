@@ -427,7 +427,7 @@ class ImageTestActivity : ComponentActivity() {
                             trace.event("VISION_REQUEST_" + (index + 1), "START",
                                 details = JSONObject().put("image_width", bitmap.width).put("image_height", bitmap.height)
                                     .put("ocr_chars", visionOcrText.length).put("model", model))
-                            val answer = withContext(Dispatchers.IO) { askVision(base, key, model, bitmap, visionOcrText, fareCheck) }
+                            val answer = withContext(Dispatchers.IO) { askVision(base, key, model, bitmap, visionOcrText, fareCheck, trace, "VISION_REQUEST_" + (index + 1)) }
                             trace.event("VISION_REQUEST_" + (index + 1), "SUCCESS", aiStarted,
                                 JSONObject().put("response_chars", answer.length))
                             val jsonParseStarted = trace.mark()
@@ -501,7 +501,9 @@ class ImageTestActivity : ComponentActivity() {
         return JSONObject().put("recognized_text", text.text).put("blocks", blocks).toString()
     }
 
-    private suspend fun askVision(base: String, key: String, model: String, bitmap: Bitmap, ocr: String, fareCheck: FreightAmountExtractor.Result): String {
+    private suspend fun askVision(base: String, key: String, model: String, bitmap: Bitmap, ocr: String,
+        fareCheck: FreightAmountExtractor.Result, trace: PipelineTrace? = null, traceLabel: String = "VISION"): String {
+        val encodeStarted = trace?.mark()
         val encoded = withContext(Dispatchers.Default) {
             val scaled = if (bitmap.width > 1600 || bitmap.height > 1600) {
                 val ratio = minOf(1600f / bitmap.width, 1600f / bitmap.height)
@@ -512,6 +514,10 @@ class ImageTestActivity : ComponentActivity() {
             if (scaled !== bitmap) scaled.recycle()
             android.util.Base64.encodeToString(bytes.toByteArray(), android.util.Base64.NO_WRAP)
         }
+        trace?.event(traceLabel + "_IMAGE_ENCODE", "SUCCESS", encodeStarted,
+            JSONObject().put("base64_chars", encoded.length).put("original_width", bitmap.width)
+                .put("original_height", bitmap.height))
+        val promptStarted = trace?.mark()
         val prompt = """
 你是货运订单图片识别与备注结构化解析器。必须查看原始订单图片，并把 PP-OCRv6 与 ML Kit 的原始文本及文字框证据作为辅助。两套OCR都可能出错，不能把任一OCR文本当成事实；以图片中清晰可见的内容为准。
 核心字段包括用户出价/订单运费、车型车长、地址、时间、装卸数量。运费只认“用户出价”对应的金额；平台奖励（例如“多赚XX元”）完全忽略，不得写入运费，也不需要提取或比较。仔细核对金额小数点；图片无法确认用户出价时 freight_yuan 必须为null，并在unclear_items中注明。
@@ -548,6 +554,9 @@ class ImageTestActivity : ComponentActivity() {
 OCR原文：
 $ocr
 """.trimIndent()
+        trace?.event(traceLabel + "_PROMPT_BUILD", "SUCCESS", promptStarted,
+            JSONObject().put("prompt_chars", prompt.length).put("ocr_chars", ocr.length))
+        val bodyStarted = trace?.mark()
         val content = JSONArray()
             .put(JSONObject().put("type", "text").put("text", prompt))
             .put(JSONObject().put("type", "image_url").put("image_url",
@@ -555,14 +564,26 @@ $ocr
         val body = JSONObject().put("model", model)
             .put("messages", JSONArray().put(JSONObject().put("role", "user").put("content", content)))
             .put("temperature", 0.1)
+        val bodyText = body.toString()
+        trace?.event(traceLabel + "_REQUEST_BODY", "READY", bodyStarted,
+            JSONObject().put("body_chars", bodyText.length).put("image_base64_chars", encoded.length)
+                .put("model", model).put("contains_image", true))
         val request = Request.Builder().url(base + "/chat/completions")
             .header("Authorization", "Bearer " + key)
-            .post(body.toString().toRequestBody("application/json".toMediaType())).build()
+            .post(bodyText.toRequestBody("application/json".toMediaType())).build()
+        val networkStarted = trace?.mark()
         return client.newCall(request).execute().use { response ->
             val raw = response.body?.string().orEmpty()
+            trace?.event(traceLabel + "_HTTP_RESPONSE", if (response.isSuccessful) "SUCCESS" else "HTTP_ERROR",
+                networkStarted, JSONObject().put("http_code", response.code).put("response_chars", raw.length)
+                    .put("content_type", response.header("Content-Type") ?: "unknown"))
             if (!response.isSuccessful) throw IllegalStateException("HTTP " + response.code + ": " + raw.take(1000))
-            JSONObject(raw).getJSONArray("choices").getJSONObject(0)
+            val parseStarted = trace?.mark()
+            val answer = JSONObject(raw).getJSONArray("choices").getJSONObject(0)
                 .getJSONObject("message").optString("content", raw)
+            trace?.event(traceLabel + "_RESPONSE_PARSE", "SUCCESS", parseStarted,
+                JSONObject().put("answer_chars", answer.length))
+            answer
         }
     }
 
