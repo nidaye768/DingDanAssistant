@@ -22,7 +22,8 @@ object OrderDecisionEngine {
         /** Whether the remarks were checked and extra-cost amount is reliable. */
         val extraCostConfirmed: Boolean,
         /** True only when the remarks have no unresolved critical requirement/risk. */
-        val criticalRequirementsClear: Boolean
+        val criticalRequirementsClear: Boolean,
+        val rules: OrderRuleConfig = OrderRuleConfig()
     )
 
     data class Result(
@@ -43,15 +44,22 @@ object OrderDecisionEngine {
             reasons += "车辆适配情况未知"
         }
 
-        if (facts.pickupCount != null && facts.pickupCount != 1) {
-            return Result(Verdict.IGNORE, null, null, null, listOf("不是一装一卸：装货点数量为 ${facts.pickupCount}"))
+        fun countProblem(actual: Int?, mode: OrderRuleConfig.CountMode, limit: Int, label: String): Result? {
+            if (actual == null) {
+                return if (facts.rules.unknownCountAction == OrderRuleConfig.UnknownAction.IGNORE)
+                    Result(Verdict.IGNORE, null, null, null, listOf("$label数量未知，当前设置为忽略"))
+                else null
+            }
+            if (!facts.rules.allowsCount(actual, mode, limit)) {
+                val message = "$label数量为 $actual，不符合当前设置（${mode.name} $limit）"
+                return if (facts.rules.unknownCountAction == OrderRuleConfig.UnknownAction.IGNORE)
+                    Result(Verdict.IGNORE, null, null, null, listOf(message))
+                else Result(Verdict.PENDING, null, null, null, listOf(message))
+            }
+            return null
         }
-        if (facts.deliveryCount != null && facts.deliveryCount != 1) {
-            return Result(Verdict.IGNORE, null, null, null, listOf("不是一装一卸：卸货点数量为 ${facts.deliveryCount}"))
-        }
-        if (facts.pickupCount == null || facts.deliveryCount == null) {
-            reasons += "装卸点数量未确认"
-        }
+        countProblem(facts.pickupCount, facts.rules.pickupMode, facts.rules.pickupLimit, "装货点")?.let { return it }
+        countProblem(facts.deliveryCount, facts.rules.deliveryMode, facts.rules.deliveryLimit, "卸货点")?.let { return it }
 
         val freight = facts.freightYuan
         val km = facts.loadedRouteKm
@@ -66,6 +74,12 @@ object OrderDecisionEngine {
         }
         if (!facts.criticalRequirementsClear) {
             reasons += "备注存在未确认的关键要求或风险"
+        }
+        val extraCostLimit = facts.rules.maxDriverExtraCostYuan
+        if (extraCostLimit != null && facts.driverExtraCostYuan != null &&
+            facts.driverExtraCostYuan > extraCostLimit) {
+            return Result(Verdict.IGNORE, null, null, null,
+                listOf("司机额外成本超过当前上限：¥${facts.driverExtraCostYuan} > ¥$extraCostLimit"))
         }
 
         if (reasons.isNotEmpty()) {
