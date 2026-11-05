@@ -442,7 +442,15 @@ class MainActivity : ComponentActivity() {
                                 JSONObject().put("confirmed_amount", fareCheck.confirmedAmount ?: JSONObject.NULL)
                                     .put("candidate_count", fareCheck.candidates.size)
                                     .put("details", fareCheck.details)
-                                    .put("pp2x_error", pp2xError).put("ml2x_error", ml2xError))
+                                    .put("pp2x_error", pp2xError).put("ml2x_error", ml2xError)
+                                    .put("pp_original_text", ppText.take(1200))
+                                    .put("ml_original_text", usableMlKitText.take(1200))
+                                    .put("pp_2x_text", pp2xText.take(1200))
+                                    .put("ml_2x_text", ml2xText.take(1200))
+                                    .put("pp_original_boxes", ppLineEvidence.take(3000))
+                                    .put("ml_original_boxes", mlLineEvidence.take(3000))
+                                    .put("pp_2x_boxes", pp2xEvidence.take(3000))
+                                    .put("ml_2x_boxes", ml2xEvidence.take(3000)))
                             val ocrEvidence = buildString {
                                 appendLine("【原图 PP-OCRv6】")
                                 appendLine(if (ppText.isBlank()) "（无有效文本）" else ppText)
@@ -579,6 +587,9 @@ class MainActivity : ComponentActivity() {
         val key = apiKey.text.toString().trim()
         val modelName = model.text.toString().trim()
         if (base.isBlank() || key.isBlank() || modelName.isBlank()) {
+            trace?.event(traceLabel + "_REQUEST", "SKIPPED", details = JSONObject()
+                .put("reason", "api_config_incomplete").put("base_present", base.isNotBlank())
+                .put("key_present", key.isNotBlank()).put("model_present", modelName.isNotBlank()))
             status.text = "OCR 已完成；填写 API 配置后可调用视觉模型"; return
         }
         scope.launch {
