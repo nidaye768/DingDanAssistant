@@ -119,6 +119,7 @@ class MainActivity : ComponentActivity() {
         body.addView(actionButton("拍摄并识别订单画面", accent) { captureAndRecognize() })
         body.addView(actionButton("打开图片导入测试工作台", 0xFF246B8E.toInt()) { startActivity(Intent(this, ImageTestActivity::class.java)) })
         body.addView(actionButton("打开 OCR 诊断探针中心", 0xFF8A5A9E.toInt()) { startActivity(Intent(this, OcrDiagnosticActivity::class.java)) })
+        body.addView(actionButton("导出最近一次流程日志", 0xFF246B8E.toInt()) { exportLatestPipelineTrace() })
         body.addView(actionButton("打开 YOLO 训练中心", 0xFF426B55.toInt()) { startActivity(Intent(this, YoloTrainingActivity::class.java)) })
 
         body.addView(section("验收中心", ink))
@@ -215,6 +216,51 @@ class MainActivity : ComponentActivity() {
         output.setBackgroundColor(0xFFFFFFFF.toInt())
         body.addView(output)
         setContentView(root)
+    }
+
+    private fun exportLatestPipelineTrace() {
+        val dir = File(filesDir, "pipeline_traces")
+        val latest = dir.listFiles()?.filter { it.isFile && it.extension == "jsonl" }
+            ?.maxByOrNull { it.lastModified() }
+        if (latest == null) {
+            status.text = "暂无流程日志，请先运行一次订单识别"
+            return
+        }
+        val intent = Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
+            addCategory(Intent.CATEGORY_OPENABLE)
+            type = "application/x-ndjson"
+            putExtra(Intent.EXTRA_TITLE, latest.name)
+        }
+        pendingTraceExport = latest
+        startActivityForResult(intent, 901)
+    }
+
+    private var pendingTraceExport: File? = null
+
+    @Deprecated("Deprecated in Android API; retained for compatibility with the current Activity UI")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode != 901 || resultCode != RESULT_OK) return
+        val source = pendingTraceExport
+        val uri = data?.data
+        if (source == null || uri == null) {
+            status.text = "日志导出取消或文件不可用"
+            return
+        }
+        scope.launch {
+            try {
+                withContext(Dispatchers.IO) {
+                    contentResolver.openOutputStream(uri)?.use { output ->
+                        source.inputStream().use { input -> input.copyTo(output) }
+                    } ?: throw IllegalStateException("无法写入所选文件")
+                }
+                status.text = "流程日志已导出：" + source.name
+            } catch (e: Exception) {
+                status.text = "日志导出失败：" + (e.localizedMessage ?: e.javaClass.simpleName)
+            } finally {
+                pendingTraceExport = null
+            }
+        }
     }
 
     private fun section(s: String, color: Int) = text(s, 17f, color, true).apply {
