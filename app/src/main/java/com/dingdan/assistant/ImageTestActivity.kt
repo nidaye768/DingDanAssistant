@@ -448,7 +448,9 @@ class ImageTestActivity : ComponentActivity() {
                                 report.appendLine("说明：这是车辆条件初步匹配，不是最终接单结论；里程、额外成本和所有可调规则仍需完整联动。")
                             } else report.appendLine("\n结构化解析失败：模型未返回有效JSON，本次不生成自动接单结论。")
                         } catch (e: Exception) {
-                            failures++; report.appendLine("\n模型调用失败：" + e.localizedMessage)
+                            failures++
+                            trace.error("VISION_REQUEST_" + (index + 1), null, e)
+                            report.appendLine("\n模型调用失败：" + (e.localizedMessage ?: e.javaClass.simpleName))
                         }
                     } else report.appendLine("\n视觉模型未调用：API配置不完整或OCR为空")
                     output.text = report.toString() + "\n\n当前进度：" + (index + 1) + "/" + targets.size
