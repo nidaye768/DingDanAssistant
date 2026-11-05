@@ -253,7 +253,7 @@ class ImageTestActivity : ComponentActivity() {
             try {
                 report.appendLine("测试类型：" + kind)
                 report.appendLine("时间：" + formatTime(started))
-                report.appendLine("OCR策略：PP-OCRv6 主引擎｜ML Kit 辅助对照；测试页保留双引擎原始结果。")
+                report.appendLine("OCR策略：PP-OCRv6 + ML Kit 双引擎交叉核对；两者原始结果都提供给视觉模型，不再只把 PP 结果当作 AI 的 OCR 依据。")
                 if (note.isNotBlank()) report.appendLine(note)
                 try {
                     // Load the native library directly first so Android's real linker error is preserved.
@@ -312,8 +312,14 @@ class ImageTestActivity : ComponentActivity() {
                         report.appendLine("\n【PP-OCRv6】识别失败：" + (e.localizedMessage ?: e.javaClass.simpleName))
                     }
                     output.text = report.toString() + "\n\n当前进度：PP-OCRv6 主识别及 ML Kit 辅助对照已运行…"
-                    val visionOcrText = ppPrimaryText.ifBlank { text }
-                    if (base.isNotBlank() && key.isNotBlank() && model.isNotBlank() && visionOcrText.isNotBlank()) {
+                    val visionOcrText = buildString {
+                        appendLine("【PP-OCRv6原始识别】")
+                        appendLine(if (ppPrimaryText.isBlank()) "（无有效文本）" else ppPrimaryText)
+                        appendLine("【ML Kit原始识别】")
+                        appendLine(if (text.isBlank()) "（无有效文本）" else text)
+                    }.trim()
+                    if (base.isNotBlank() && key.isNotBlank() && model.isNotBlank() &&
+                        (ppPrimaryText.isNotBlank() || text.isNotBlank())) {
                         try {
                             status.text = "正在调用视觉模型复核：第 ${index + 1}/${targets.size} 个区域…"
                             val answer = withContext(Dispatchers.IO) { askVision(base, key, model, bitmap, visionOcrText) }
@@ -372,7 +378,9 @@ class ImageTestActivity : ComponentActivity() {
             android.util.Base64.encodeToString(bytes.toByteArray(), android.util.Base64.NO_WRAP)
         }
         val prompt = """
-你是货运订单备注结构化解析器。只根据图片和OCR原文提取信息，不得补全、推断或猜测。
+你是货运订单图片识别与备注结构化解析器。必须同时查看原始订单图片，并交叉比较下方 PP-OCRv6 与 ML Kit 两套OCR文本。两套OCR都可能出错，不能默认PP-OCRv6优先，也不能把任一OCR文本当成事实；以图片中清晰可见的内容为准。
+关键字段（尤其运费/用户出价/多赚金额、车型车长、地址、时间、装卸数量）必须逐项对照图片。金额标签必须区分：“多赚XX元”不是“用户出价XX元”，不得混为同一个金额；仔细核对小数点，不能把61.6识别成616或6.16，也不能把42识别成4.2。
+如果图片本身也无法清楚确认，相关字段必须保持null，并在unclear_items中写明冲突原文及“需人工核实”，不得自行猜测或按某一OCR引擎强行定值。
 必须只返回一个合法JSON对象，不要Markdown代码围栏或JSON以外的说明。
 无法确认的字符串、数字和数量一律返回null；数组没有明确内容时返回空数组。
 司机额外成本只有在明确说明由司机承担且金额明确时才填写driver_extra_cost_yuan，否则必须为null，不能把高速费、过路费或其他费用默认成0。
