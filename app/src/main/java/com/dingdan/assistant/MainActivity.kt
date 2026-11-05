@@ -637,7 +637,10 @@ $ocr
                     output.append("\n\n结构化解析失败：模型未按要求返回有效JSON。本次不生成自动接单结论。")
                     status.text = "模型分析完成，但结构化JSON解析失败"
                 }
-            } catch (e: Exception) { status.text = "模型分析失败：${e.localizedMessage}" }
+            } catch (e: Exception) {
+                trace?.error(traceLabel + "_REQUEST", null, e)
+                status.text = "模型分析失败：" + (e.localizedMessage ?: e.javaClass.simpleName)
+            }
         }
     }
 
