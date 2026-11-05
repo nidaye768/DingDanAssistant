@@ -64,7 +64,7 @@ object OrderDecisionEngine {
 
         val freight = facts.freightYuan
         val km = facts.loadedRouteKm
-        val floor = facts.minYuanPerLoadedKm
+        val floor = facts.rules.minYuanPerLoadedKm ?: facts.minYuanPerLoadedKm
         if (freight == null || !freight.isFinite() || freight <= 0.0) reasons += "运费金额缺失或无效"
         if (km == null || !km.isFinite() || km <= 0.0) reasons += "载货道路里程缺失或无效"
         if (floor == null || !floor.isFinite() || floor < 0.0) reasons += "载货公里单价门槛未设置"
