@@ -487,21 +487,35 @@ class OcrDiagnosticActivity : ComponentActivity() {
                 for (i in 0 until engineResults.length()) {
                     val item = engineResults.optJSONObject(i) ?: continue
                     val variant = item.optString("variant", "unknown")
-                    if (variant != "original" && variant != "upscale_2x") continue
-                    spatialCandidates += FreightAmountExtractor.fromDiagnosticPp(item.optJSONObject("pp_ocr"), variant)
-                    spatialCandidates += FreightAmountExtractor.fromDiagnosticMl(item.optJSONObject("ml_kit"), variant)
+                    if (variant != "original" && variant != "upscale_2x" && variant != "gray_enhanced_2x") continue
+                    val ppCandidate = FreightAmountExtractor.fromDiagnosticPp(item.optJSONObject("pp_ocr"), variant)
+                    val mlCandidate = FreightAmountExtractor.fromDiagnosticMl(item.optJSONObject("ml_kit"), variant)
+                    spatialCandidates += ppCandidate
+                    spatialCandidates += mlCandidate
+                    trace.event("P6_SPATIAL_CANDIDATES_$variant",
+                        if (ppCandidate != null || mlCandidate != null) "CANDIDATE_FOUND" else "NO_CANDIDATE",
+                        details = JSONObject()
+                            .put("pp_amount", ppCandidate?.amount ?: JSONObject.NULL)
+                            .put("pp_method", ppCandidate?.method ?: JSONObject.NULL)
+                            .put("ml_amount", mlCandidate?.amount ?: JSONObject.NULL)
+                            .put("ml_method", mlCandidate?.method ?: JSONObject.NULL))
                 }
                 val spatialFareCheck = FreightAmountExtractor.resolve(spatialCandidates)
                 val parser = JSONObject()
                     .put("target_field", "freight_yuan")
                     .put("expected_value", expectedValue ?: JSONObject.NULL)
-                    .put("primary_image_variant", "original+upscale_2x spatial consensus")
+                    .put("primary_image_variant", "original+upscale_2x+gray_enhanced_2x spatial evidence")
                     .put("spatial_extraction_state", spatialFareCheck.state)
                     .put("spatial_extraction_amount_yuan", spatialFareCheck.confirmedAmount ?: JSONObject.NULL)
                     .put("spatial_extraction_details", spatialFareCheck.details)
                     .put("pp_ocr_freight_yuan", ppFare ?: JSONObject.NULL)
                     .put("ml_kit_freight_yuan", mlFare ?: JSONObject.NULL)
                     .put("variant_results", variantParsers)
+                    .put("spatial_candidate_count", spatialFareCheck.candidates.size)
+                    .put("spatial_candidates", JSONArray().apply { spatialFareCheck.candidates.forEach { c ->
+                        put(JSONObject().put("amount_yuan", c.amount).put("source", c.source)
+                            .put("variant", c.variant).put("method", c.method))
+                    } })
                     .put("regex", "用户出价[\\s:：¥￥]*([0-9]{1,7}(?:[.．][0-9]{1,2})?)")
                     .put("platform_reward", "ignored")
                     .put("legacy_regex_note", "legacy regex helper retained; spatial extractor is authoritative")
