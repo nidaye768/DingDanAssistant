@@ -264,7 +264,16 @@ class MainActivity : ComponentActivity() {
                 override fun onImageSaved(result: ImageCapture.OutputFileResults) {
                     val bitmap = BitmapFactory.decodeFile(file.absolutePath)
                     if (bitmap == null) { runOnUiThread { status.text = "图片读取失败" }; return }
-                    val yolo = try { YoloOrderDetector.detect(this@MainActivity, bitmap) } catch (e: Exception) {
+                    val trace = PipelineTrace(this@MainActivity, "live_camera", JSONObject()
+                        .put("image_width", bitmap.width).put("image_height", bitmap.height).put("mode", mode))
+                    val yoloStarted = trace.mark()
+                    trace.event("YOLO_DETECT", "START")
+                    val yolo = try { YoloOrderDetector.detect(this@MainActivity, bitmap).also {
+                        trace.event("YOLO_DETECT", "SUCCESS", yoloStarted, JSONObject()
+                            .put("inference_ms", it.inferenceMs).put("detection_count", it.detections.size)
+                            .put("class0_complete", it.detections.count { d -> d.classId == 0 })
+                            .put("class1_partial", it.detections.count { d -> d.classId == 1 }))
+                    } } catch (e: Exception) { trace.error("YOLO_DETECT", yoloStarted, e);
                         runOnUiThread {
                             output.text = "YOLO检测失败，已阻止 OCR/AI 审核，避免把不完整或未知订单送去审核。\n原因：${e.localizedMessage ?: e.javaClass.simpleName}"
                             status.text = "YOLO不可用｜自动审核已暂停"
@@ -275,6 +284,9 @@ class MainActivity : ComponentActivity() {
                     val complete = yolo.detections.filter { it.classId == 0 }
                     val partialCount = yolo.detections.count { it.classId == 1 }
                     if (complete.isEmpty()) {
+                        trace.event("ORDER_FILTER", "SKIPPED", details = JSONObject()
+                            .put("reason", "no_complete_order").put("partial_count", partialCount))
+                        trace.finish("NO_COMPLETE_ORDER")
                         runOnUiThread {
                             output.text = buildString {
                                 appendLine("YOLO检测完成｜推理 ${yolo.inferenceMs} ms")
@@ -289,29 +301,45 @@ class MainActivity : ComponentActivity() {
                     }
                     scope.launch {
                         val report = StringBuilder()
+                        report.appendLine("执行追踪编号：" + trace.runId)
+                        report.appendLine("本机流程日志：" + trace.path())
                         report.appendLine("YOLO订单筛选：完整订单 ${complete.size} 张｜部分露出订单 $partialCount 张")
                         report.appendLine("YOLO推理耗时：${yolo.inferenceMs} ms")
                         complete.forEachIndexed { index, detection ->
+                            val cropStarted = trace.mark()
                             val orderBitmap = YoloOrderDetector.crop(bitmap, detection)
+                            trace.event("ORDER_CROP_" + (index + 1), "SUCCESS", cropStarted, JSONObject()
+                                .put("width", orderBitmap.width).put("height", orderBitmap.height)
+                                .put("confidence", detection.confidence))
                             report.appendLine("\n========== 完整订单 ${index + 1} ==========")
                             report.appendLine("YOLO置信度：${"%.1f".format(detection.confidence * 100)}%")
                             status.text = "完整订单 ${index + 1}/${complete.size}：PP-OCRv6识别中…"
                             var ppDiagnostic = ""
+                            val ppStarted = trace.mark()
+                            trace.event("OCR_PP_ORIGINAL_" + (index + 1), "START")
                             val ppText = try {
                                 withContext(Dispatchers.IO) {
                                     recognizeWithPaddle(orderBitmap).also { ppDiagnostic = it.second }.first
-                                }
+                                }.also { trace.event("OCR_PP_ORIGINAL_" + (index + 1), "SUCCESS", ppStarted,
+                                    JSONObject().put("text_length", it.length).put("text_preview", it.take(300))) }
                             } catch (e: Exception) {
+                                trace.error("OCR_PP_ORIGINAL_" + (index + 1), ppStarted, e)
                                 ppDiagnostic = "PP-OCRv6失败：" + (e.localizedMessage ?: e.javaClass.simpleName)
                                 ""
                             }
                             status.text = "完整订单 ${index + 1}/${complete.size}：ML Kit辅助校验中…"
                             var mlKitError = ""
+                            val mlStarted = trace.mark()
+                            trace.event("OCR_ML_ORIGINAL_" + (index + 1), "START")
                             val mlKitResult = try {
                                 val recognizer = TextRecognition.getClient(ChineseTextRecognizerOptions.Builder().build())
                                 try { recognizer.process(InputImage.fromBitmap(orderBitmap, 0)).awaitResult() }
                                 finally { recognizer.close() }
-                            } catch (e: Exception) {
+                            }.also { trace.event("OCR_ML_ORIGINAL_" + (index + 1), "SUCCESS", mlStarted,
+                                JSONObject().put("text_length", it.text.length).put("text_preview", it.text.take(300))
+                                    .put("line_count", it.textBlocks.sumOf { block -> block.lines.size })) }
+                            catch (e: Exception) {
+                                trace.error("OCR_ML_ORIGINAL_" + (index + 1), mlStarted, e)
                                 mlKitError = e.localizedMessage ?: e.javaClass.simpleName
                                 null
                             }
@@ -321,14 +349,23 @@ class MainActivity : ComponentActivity() {
                             val twoX = Bitmap.createScaledBitmap(orderBitmap, orderBitmap.width * 2, orderBitmap.height * 2, true)
                             var pp2xText = ""
                             var pp2xEvidence = ""
+                            val pp2xStarted = trace.mark()
+                            trace.event("OCR_PP_2X_" + (index + 1), "START", details = JSONObject()
+                                .put("width", twoX.width).put("height", twoX.height))
                             val pp2xError = try {
                                 withContext(Dispatchers.IO) {
                                     recognizeWithPaddle(twoX).also { pp2xEvidence = it.second }.first
-                                }
+                                }.also { trace.event("OCR_PP_2X_" + (index + 1), "SUCCESS", pp2xStarted,
+                                    JSONObject().put("text_length", it.length).put("text_preview", it.take(300))) }
                                 ""
-                            } catch (e: Exception) { e.localizedMessage ?: e.javaClass.simpleName }
+                            } catch (e: Exception) {
+                                trace.error("OCR_PP_2X_" + (index + 1), pp2xStarted, e)
+                                e.localizedMessage ?: e.javaClass.simpleName
+                            }
                             var ml2xText = ""
                             var ml2xEvidence = "{}"
+                            val ml2xStarted = trace.mark()
+                            trace.event("OCR_ML_2X_" + (index + 1), "START")
                             val ml2xError = try {
                                 val recognizer2x = TextRecognition.getClient(ChineseTextRecognizerOptions.Builder().build())
                                 try {
@@ -336,15 +373,26 @@ class MainActivity : ComponentActivity() {
                                     ml2xText = result2x.text
                                     ml2xEvidence = serializeMlKitEvidence(result2x)
                                 } finally { recognizer2x.close() }
+                                trace.event("OCR_ML_2X_" + (index + 1), "SUCCESS", ml2xStarted,
+                                    JSONObject().put("text_length", ml2xText.length).put("text_preview", ml2xText.take(300)))
                                 ""
-                            } catch (e: Exception) { e.localizedMessage ?: e.javaClass.simpleName }
+                            } catch (e: Exception) {
+                                trace.error("OCR_ML_2X_" + (index + 1), ml2xStarted, e)
+                                e.localizedMessage ?: e.javaClass.simpleName
+                            }
                             twoX.recycle()
+                            val parseStarted = trace.mark()
                             val fareCheck = FreightAmountExtractor.resolve(listOf(
                                 FreightAmountExtractor.fromPp(ppText, ppLineEvidence, "original", "PP-OCR"),
                                 FreightAmountExtractor.fromMl(mlLineEvidence, "original", "ML Kit"),
                                 FreightAmountExtractor.fromPp(pp2xText, pp2xEvidence.substringAfter("文字行证据：", ""), "upscale_2x", "PP-OCR"),
                                 FreightAmountExtractor.fromMl(ml2xEvidence, "upscale_2x", "ML Kit")
                             ))
+                            trace.event("FREIGHT_RESOLVE_" + (index + 1), fareCheck.state, parseStarted,
+                                JSONObject().put("confirmed_amount", fareCheck.confirmedAmount ?: JSONObject.NULL)
+                                    .put("candidate_count", fareCheck.candidates.size)
+                                    .put("details", fareCheck.details)
+                                    .put("pp2x_error", pp2xError).put("ml2x_error", ml2xError))
                             val ocrEvidence = buildString {
                                 appendLine("【原图 PP-OCRv6】")
                                 appendLine(if (ppText.isBlank()) "（无有效文本）" else ppText)
@@ -370,9 +418,16 @@ class MainActivity : ComponentActivity() {
                                 status.text = "完整订单 " + (index + 1) + "/" + complete.size + "：提交四路 OCR 证据供 AI 对照…"
                                 requestVision(orderBitmap, ocrEvidence, fareCheck)
                                 report.appendLine("已提交原图 + 2倍图、PP-OCRv6 + ML Kit 证据供 AI 对照；运费由本地核验结果约束")
-                            } else report.appendLine("四路OCR均为空：跳过AI调用")
+                            } else {
+                                trace.event("VISION_" + (index + 1), "SKIPPED", details = JSONObject().put("reason", "all_ocr_empty"))
+                                report.appendLine("四路OCR均为空：跳过AI调用")
+                            }
                             output.text = report.toString()
                         }
+                        trace.finish("SUCCESS", JSONObject().put("complete_orders", complete.size)
+                            .put("partial_orders", partialCount))
+                        report.appendLine("\n流程日志文件：" + trace.path())
+                        output.text = report.toString()
                         status.text = "完整订单识别完成：${complete.size} 张｜部分订单已跳过"
                         bitmap.recycle()
                     }
