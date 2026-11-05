@@ -11,7 +11,8 @@ import com.microsoft.onnxruntime.OrtSession
 import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
-import java.nio.FloatBuffer
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 import kotlin.math.max
 import kotlin.math.min
 
@@ -105,7 +106,10 @@ object YoloOrderDetector {
         inputBitmap.recycle()
 
         val shape = longArrayOf(1, 3, INPUT_SIZE.toLong(), INPUT_SIZE.toLong())
-        val tensor = OnnxTensor.createTensor(env, FloatBuffer.wrap(input), shape)
+        val inputBuffer = ByteBuffer.allocateDirect(input.size * 4).order(ByteOrder.nativeOrder()).asFloatBuffer()
+        inputBuffer.put(input)
+        inputBuffer.rewind()
+        val tensor = OnnxTensor.createTensor(env, inputBuffer, shape)
         val outputs = modelSession.run(mapOf(modelSession.inputNames.iterator().next() to tensor))
         try {
             val raw = outputs[0].value as? Array<*>
