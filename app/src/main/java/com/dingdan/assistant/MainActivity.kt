@@ -126,6 +126,7 @@ class MainActivity : ComponentActivity() {
         body.addView(actionButton("测试大模型 API 连通性", 0xFF426B55.toInt()) { testApi() })
         body.addView(actionButton("清空测试输出", 0xFF687581.toInt()) { output.text = "等待测试或识别结果…" })
 
+        body.addView(actionButton("规则设置", 0xFF426B55.toInt()) { startActivity(Intent(this, OrderRuleSettingsActivity::class.java)) })
         body.addView(section("订单判断模拟测试", ink))
         body.addView(text("手动输入订单数据，单独验证规则引擎；不会接触真实订单，也不会自动抢单。", 12f, muted))
         fun numberField(hint: String, value: String, decimal: Boolean): EditText =
