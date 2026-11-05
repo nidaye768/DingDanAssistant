@@ -9,6 +9,7 @@
         android:usesCleartextTraffic="false">
         <activity android:name=".OrderRuleSettingsActivity" android:screenOrientation="portrait" android:exported="false"/>
         <activity android:name=".ImageTestActivity" android:screenOrientation="portrait" android:exported="false"/>
+        <activity android:name=".OcrDiagnosticActivity" android:screenOrientation="portrait" android:exported="false"/>
         <activity android:name=".YoloTrainingActivity" android:screenOrientation="portrait" android:exported="false"/>
         <activity android:name=".MainActivity" android:screenOrientation="portrait" android:exported="true">
             <intent-filter>

@@ -118,6 +118,7 @@ class MainActivity : ComponentActivity() {
         body.addView(preview, LinearLayout.LayoutParams(-1, dp(210)))
         body.addView(actionButton("拍摄并识别订单画面", accent) { captureAndRecognize() })
         body.addView(actionButton("打开图片导入测试工作台", 0xFF246B8E.toInt()) { startActivity(Intent(this, ImageTestActivity::class.java)) })
+        body.addView(actionButton("打开 OCR 诊断探针中心", 0xFF8A5A9E.toInt()) { startActivity(Intent(this, OcrDiagnosticActivity::class.java)) })
         body.addView(actionButton("打开 YOLO 训练中心", 0xFF426B55.toInt()) { startActivity(Intent(this, YoloTrainingActivity::class.java)) })
 
         body.addView(section("验收中心", ink))
