@@ -321,8 +321,15 @@ class ImageTestActivity : ComponentActivity() {
                             val answer = withContext(Dispatchers.IO) { askVision(base, key, model, bitmap, visionOcrText) }
                             val structured = try { OrderRemarkAnalysis.parse(answer) } catch (_: Exception) { null }
                             report.appendLine("\nAI备注解析原始响应：\n" + answer)
-                            if (structured != null) report.appendLine("\n" + structured.toDisplayText())
-                            else report.appendLine("\n结构化解析失败：模型未返回有效JSON，本次不生成自动接单结论。")
+                            if (structured != null) {
+                                report.appendLine("\n" + structured.toDisplayText())
+                                val vehicleConfig = OrderRuleConfig.load(getSharedPreferences("api_config", MODE_PRIVATE))
+                                val matchReport = OrderRequirementMatcher.evaluate(structured, vehicleConfig)
+                                report.appendLine("\n【订单要求与车辆档案匹配】")
+                                report.appendLine("车辆匹配状态：" + matchReport.vehicleMatch.name)
+                                matchReport.reasons.forEach { report.appendLine("• " + it) }
+                                report.appendLine("说明：这是车辆条件初步匹配，不是最终接单结论；里程、额外成本和所有可调规则仍需完整联动。")
+                            } else report.appendLine("\n结构化解析失败：模型未返回有效JSON，本次不生成自动接单结论。")
                         } catch (e: Exception) {
                             failures++; report.appendLine("\n模型调用失败：" + e.localizedMessage)
                         }
