@@ -168,7 +168,8 @@ class MainActivity : ComponentActivity() {
             val result = OrderDecisionEngine.evaluate(
                 OrderDecisionEngine.Facts(
                     freight, km, floor, match, pickup, delivery, extra,
-                    simCostConfirmed.isChecked, simRequirementsClear.isChecked
+                    simCostConfirmed.isChecked, simRequirementsClear.isChecked,
+                    OrderRuleConfig.load(prefs)
                 )
             )
             val verdictText = when (result.verdict) {
