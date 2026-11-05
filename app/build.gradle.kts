@@ -11,8 +11,8 @@ android {
         applicationId = "com.dingdan.assistant"
         minSdk = 26
         targetSdk = 35
-        versionCode = 20
-        versionName = "1.3.8-pipeline-probes"
+        versionCode = 21
+        versionName = "1.3.9-rec-only-probe"
     }
 
     compileOptions {

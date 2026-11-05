@@ -13,6 +13,11 @@ import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.text.TextRecognition
 import com.google.mlkit.vision.text.chinese.ChineseTextRecognizerOptions
 import com.paddle.ocr.PaddleOCR
+import com.paddle.ocr.EngineConfig
+import com.paddle.ocr.engine.ORTSessionManager
+import com.paddle.ocr.engine.RecognitionEngine
+import com.paddle.ocr.model.ModelConfig
+import com.paddle.ocr.util.BitmapUtils
 import com.paddle.ocr.util.OpenCVUtils
 import kotlinx.coroutines.*
 import org.json.JSONArray
@@ -41,6 +46,7 @@ class OcrDiagnosticActivity : ComponentActivity() {
     private lateinit var result: TextView
     private lateinit var expected: EditText
     private lateinit var runButton: Button
+    private lateinit var recOnlyButton: Button
     private lateinit var exportButton: Button
 
     private val imagePicker = registerForActivityResult(ActivityResultContracts.GetContent()) { uri: Uri? ->
@@ -118,6 +124,9 @@ class OcrDiagnosticActivity : ComponentActivity() {
         body.addView(label("4. 运行诊断：原图、2倍、3倍、2倍灰度增强；每组都跑 PP-OCR 和 ML Kit。", 12f))
         runButton = button("开始 OCR 诊断", 0xFF246B8E.toInt()) { runDiagnostic() }
         body.addView(runButton)
+        body.addView(label("Rec-only：跳过 Det 检测推理，直接将框选区域作为单行文字送入识别模型。建议只框选 61.6元。", 12f))
+        recOnlyButton = button("仅运行 PP-OCR Rec 识别", 0xFF7651A1.toInt()) { runRecOnly() }
+        body.addView(recOnlyButton)
         status = label("等待导入图片", 13f, true)
         body.addView(status)
         body.addView(label("诊断结论与探针日志", 17f, true))
@@ -151,6 +160,136 @@ class OcrDiagnosticActivity : ComponentActivity() {
                 status.text = "图片载入成功"
             } catch (e: Exception) {
                 status.text = "图片读取失败：" + (e.localizedMessage ?: e.javaClass.simpleName)
+            }
+        }
+    }
+
+    /**
+     * Directly invokes RecognitionEngine. The SDK loader initializes both sessions,
+     * but this probe never calls DetectionEngine.detect().
+     */
+    private fun runRecOnly() {
+        val sourceBitmap = source ?: run { status.text = "请先导入图片"; return }
+        val roi = preview.selectedBitmap() ?: run {
+            status.text = "请先框选文字，建议只框选 61.6元并留少量空白"; return
+        }
+        val roiGeometry = preview.selectionGeometryJson()
+        runButton.isEnabled = false
+        recOnlyButton.isEnabled = false
+        exportButton.isEnabled = false
+        status.text = "正在执行 PP-OCR Rec-only 测试…"
+        scope.launch {
+            val id = "REC_ONLY_" + timestamp()
+            val dir = File(filesDir, "ocr_rec_only/" + id)
+            val imagesDir = File(dir, "images")
+            val trace = PipelineTrace(this@OcrDiagnosticActivity, "ppocr_rec_only",
+                JSONObject().put("test_id", id).put("roi_width", roi.width)
+                    .put("roi_height", roi.height).put("roi_geometry_in_source", roiGeometry))
+            val variants = mutableListOf<Pair<String, Bitmap>>()
+            var manager: ORTSessionManager? = null
+            try {
+                variants.add("original" to roi)
+                variants.add("upscale_2x" to scale(roi, 2))
+                variants.add("upscale_3x" to scale(roi, 3))
+                variants.add("gray_enhanced_2x" to enhanceGray(variants[1].second))
+                val rows = JSONArray()
+                val started = trace.mark()
+                withContext(Dispatchers.IO) {
+                    check(imagesDir.mkdirs() || imagesDir.isDirectory) { "无法创建 Rec-only 目录" }
+                    saveJpeg(sourceBitmap, File(imagesDir, "01_source.jpg"))
+                    saveJpeg(roi, File(imagesDir, "02_roi_original.jpg"))
+                    System.loadLibrary("opencv_java4")
+                    check(OpenCVUtils.init(this@OcrDiagnosticActivity)) { "OpenCV 初始化失败" }
+                    val ort = ORTSessionManager(this@OcrDiagnosticActivity, EngineConfig())
+                    manager = ort
+                    // Both sessions are initialized by this SDK API; Det inference is not executed.
+                    ort.loadModels("models/det/inference.onnx", "models/rec/inference.onnx")
+                    val modelConfig = ModelConfig.parse(this@OcrDiagnosticActivity, "models/rec/inference.yml")
+                    val recEngine = RecognitionEngine(ort, modelConfig.characterList)
+                    variants.forEachIndexed { index, pair ->
+                        val bitmap = pair.second
+                        val fileName = "images/variant_" + (index + 1) + "_" + pair.first + ".jpg"
+                        saveJpeg(bitmap, File(dir, fileName))
+                        val mat = BitmapUtils.bitmapToBGRMat(bitmap)
+                        val recStarted = android.os.SystemClock.elapsedRealtime()
+                        try {
+                            val rec = recEngine.recognize(listOf(mat))
+                            val decoded = rec.texts.firstOrNull()
+                            rows.put(JSONObject()
+                                .put("variant", pair.first).put("image_file", fileName)
+                                .put("input_width", bitmap.width).put("input_height", bitmap.height)
+                                .put("rec_input_shape", JSONArray(rec.inputShape))
+                                .put("recognized_text", decoded?.first ?: "")
+                                .put("confidence", decoded?.second ?: 0.0)
+                                .put("preprocess_ms", rec.preprocessMs)
+                                .put("inference_ms", rec.inferenceMs)
+                                .put("postprocess_ms", rec.postprocessMs)
+                                .put("rec_total_ms", rec.timeMs)
+                                .put("wall_time_ms", android.os.SystemClock.elapsedRealtime() - recStarted))
+                        } finally { mat.release() }
+                    }
+                }
+                val report = JSONObject()
+                    .put("schema", "dingdan_ppocr_rec_only").put("schema_version", 1)
+                    .put("test_id", id).put("model", "PP-OCRv6_small_rec_onnx")
+                    .put("mode", "REC_ONLY_SKIP_DET_INFERENCE")
+                    .put("detector_session_loaded_but_not_executed", true)
+                    .put("recognizer", "RecognitionEngine + RecPreprocessor + CTCDecoder")
+                    .put("roi_width", roi.width).put("roi_height", roi.height)
+                    .put("roi_geometry_in_source", roiGeometry).put("variants", rows)
+                withContext(Dispatchers.IO) {
+                    File(dir, "rec_only.json").writeText(report.toString(2), Charsets.UTF_8)
+                    File(dir, "report.txt").writeText(buildString {
+                        appendLine("PP-OCRv6_small Rec-only 单独识别测试")
+                        appendLine("跳过 Det 检测推理，直接执行 Rec 预处理、ONNX 推理和 CTC 解码。")
+                        appendLine("注意：SDK 初始化时仍加载 Det session，但本测试不执行 Det。")
+                        appendLine("ROI：" + roi.width + " × " + roi.height)
+                        for (i in 0 until rows.length()) {
+                            val row = rows.getJSONObject(i)
+                            appendLine()
+                            appendLine("[" + row.optString("variant") + "]")
+                            appendLine("识别文本：" + row.optString("recognized_text"))
+                            appendLine("置信度：" + row.optDouble("confidence"))
+                            appendLine("Rec 输入形状：" + row.optJSONArray("rec_input_shape"))
+                            appendLine("耗时：预处理 " + row.optLong("preprocess_ms") + "ms / 推理 " +
+                                row.optLong("inference_ms") + "ms / 解码 " + row.optLong("postprocess_ms") + "ms")
+                        }
+                    }, Charsets.UTF_8)
+                    runCatching { File(trace.path()).copyTo(File(dir, "pipeline_trace.jsonl"), overwrite = true) }
+                    val manifest = JSONObject()
+                    val files = JSONArray()
+                    dir.walkTopDown().filter { it.isFile && it.name != "manifest.json" }.forEach { file ->
+                        files.put(JSONObject().put("path", file.relativeTo(dir).invariantSeparatorsPath)
+                            .put("size_bytes", file.length()).put("sha256", sha256(file)))
+                    }
+                    manifest.put("test_id", id).put("files", files)
+                    File(dir, "manifest.json").writeText(manifest.toString(2), Charsets.UTF_8)
+                }
+                trace.event("REC_ONLY_COMPLETED", "SUCCESS", started, JSONObject().put("variant_count", rows.length()))
+                trace.finish("SUCCESS")
+                lastDiagnosticDir = dir
+                result.text = buildString {
+                    appendLine("PP-OCRv6_small Rec-only 测试完成（已跳过 Det 推理）")
+                    for (i in 0 until rows.length()) {
+                        val row = rows.getJSONObject(i)
+                        appendLine(row.optString("variant") + "：" + row.optString("recognized_text") +
+                            "｜置信度 " + "%.4f".format(Locale.US, row.optDouble("confidence")))
+                    }
+                    appendLine()
+                    appendLine("原图、处理图、识别文本、输入形状、置信度和耗时已保存。点击导出 ZIP。")
+                }
+                status.text = "Rec-only 测试完成"
+                exportButton.isEnabled = true
+            } catch (e: Throwable) {
+                trace.error("REC_ONLY_FAILED", null, e)
+                trace.finish("FAILED")
+                status.text = "Rec-only 测试失败：" + (e.localizedMessage ?: e.javaClass.simpleName)
+                result.text = "独立识别测试未完成，请检查错误信息。"
+            } finally {
+                withContext(Dispatchers.IO) { runCatching { manager?.release() } }
+                variants.forEach { if (!it.second.isRecycled) it.second.recycle() }
+                recOnlyButton.isEnabled = true
+                runButton.isEnabled = true
             }
         }
     }
