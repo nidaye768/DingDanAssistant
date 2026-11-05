@@ -153,6 +153,35 @@ object AcceptanceSuite {
         check("尾板要求与车辆配置核对", tailboardRemark.vehicleMatch == OrderDecisionEngine.Match.MISMATCHED,
             "订单要求尾板而车辆档案未配置尾板时标记不匹配")
 
+
+        val scaleConsensus = FreightAmountExtractor.resolve(listOf(
+            FreightAmountExtractor.Candidate(6.0, "PP-OCR", "original", "same-row"),
+            FreightAmountExtractor.Candidate(1.6, "ML Kit", "original", "same-row"),
+            FreightAmountExtractor.Candidate(61.6, "PP-OCR", "upscale_2x", "adjacent-box"),
+            FreightAmountExtractor.Candidate(61.6, "ML Kit", "upscale_2x", "same-row")
+        ))
+        check("2倍图一致金额不被原图错误否决",
+            scaleConsensus.confirmedAmount == 61.6 && scaleConsensus.state == "CONFIRMED_2X",
+            "原图6/1.6冲突时，采用2倍图双引擎一致的61.6元")
+
+        val overlapCandidate = FreightAmountExtractor.fromPp(
+            "用户出价\\n61.6元 已全额支付",
+            "text=用户出价; confidence=0.999; points=(147,1041) (608,1192) || " +
+                "text=61.6元 已全额支付; confidence=0.987; points=(574,987) (1644,1282)",
+            "upscale_2x", "PP-OCR"
+        )
+        check("金额框轻微重叠仍能关联", overlapCandidate?.amount == 61.6,
+            "标签框与金额框水平重叠34px，但垂直位置一致，允许建立关联")
+
+        val unresolvedScale = FreightAmountExtractor.resolve(listOf(
+            FreightAmountExtractor.Candidate(6.0, "PP-OCR", "original", "same-row"),
+            FreightAmountExtractor.Candidate(1.6, "ML Kit", "original", "same-row"),
+            FreightAmountExtractor.Candidate(61.6, "ML Kit", "upscale_2x", "same-row")
+        ))
+        check("证据不足时仍保持待确认", unresolvedScale.confirmedAmount == null &&
+            unresolvedScale.state == "CONFLICT",
+            "不能因为只有一个尺度候选就擅自确认金额")
+
         check("API 地址格式检查", "https://example.com/v1".startsWith("https://"),
             "HTTPS 地址格式基础检查")
         return out
