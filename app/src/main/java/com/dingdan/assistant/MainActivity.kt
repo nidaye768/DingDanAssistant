@@ -390,7 +390,39 @@ class MainActivity : ComponentActivity() {
                     val bytes = ByteArrayOutputStream()
                     bitmap.compress(Bitmap.CompressFormat.JPEG, 82, bytes)
                     val encoded = Base64.encodeToString(bytes.toByteArray(), Base64.NO_WRAP)
-                    val prompt = "你是货运订单审核助手。请识别报价、车型、起终点和备注要求；将重量、体积、尺寸、装卸、时间、费用、人员、动力类型等逐项拆解。不确定标记 unknown，不得猜测，不自动接单。OCR：$ocr"
+                    val prompt = """
+你是货运订单备注结构化解析器。只根据图片和OCR原文提取信息，不得补全、推断或猜测。
+必须只返回一个合法JSON对象，不要Markdown代码围栏或JSON以外的说明。
+无法确认的字符串、数字和数量一律返回null；数组没有明确内容时返回空数组。
+司机额外成本只有在明确说明由司机承担且金额明确时才填写driver_extra_cost_yuan，否则必须为null，不能把高速费、过路费或其他费用默认成0。
+装货点/卸货点数量只有明确能数清时才填写；“一装一卸”可分别填1。
+风险和不确定项必须单独列出；每个关键结论尽可能提供原文依据。
+字段必须严格使用以下结构：
+{
+  "vehicle_type": null,
+  "vehicle_length_m": null,
+  "vehicle_volume_m3": null,
+  "cargo_name": null,
+  "cargo_weight_kg": null,
+  "cargo_volume_m3": null,
+  "cargo_length_m": null,
+  "pickup_count": null,
+  "delivery_count": null,
+  "driver_extra_cost_yuan": null,
+  "extra_cost_items": [],
+  "toll_requirement": null,
+  "arrival_time": null,
+  "personnel_requirement": null,
+  "loading_unloading": null,
+  "risks": [],
+  "unclear_items": [],
+  "evidence": [],
+  "summary": ""
+}
+注意单位统一：重量用kg，长度用米，体积用立方米，金额用人民币元。不能把货物重量误认为车辆载重，也不能把货物体积误认为车辆容积。
+OCR原文：
+$ocr
+""".trimIndent()
                     val content = JSONArray()
                         .put(JSONObject().put("type", "text").put("text", prompt))
                         .put(JSONObject().put("type", "image_url").put("image_url", JSONObject().put("url", "data:image/jpeg;base64,$encoded")))
@@ -407,8 +439,15 @@ class MainActivity : ComponentActivity() {
                             .getJSONObject("message").optString("content", raw)
                     }
                 }
-                output.append("\n\n视觉模型初步分析：\n$answer")
-                status.text = "本地识别及模型分析完成"
+                val structured = try { OrderRemarkAnalysis.parse(answer) } catch (_: Exception) { null }
+                output.append("\n\nAI备注解析原始响应：\n$answer")
+                if (structured != null) {
+                    output.append("\n\n" + structured.toDisplayText())
+                    status.text = "AI备注结构化解析完成｜请核对待确认项"
+                } else {
+                    output.append("\n\n结构化解析失败：模型未按要求返回有效JSON。本次不生成自动接单结论。")
+                    status.text = "模型分析完成，但结构化JSON解析失败"
+                }
             } catch (e: Exception) { status.text = "模型分析失败：${e.localizedMessage}" }
         }
     }
