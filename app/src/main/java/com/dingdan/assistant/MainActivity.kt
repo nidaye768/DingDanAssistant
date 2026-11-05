@@ -417,7 +417,7 @@ class MainActivity : ComponentActivity() {
                             report.appendLine("本地运费核验：" + fareCheck.details)
                             if (ppText.isNotBlank() || usableMlKitText.isNotBlank() || pp2xText.isNotBlank() || ml2xText.isNotBlank()) {
                                 status.text = "完整订单 " + (index + 1) + "/" + complete.size + "：提交四路 OCR 证据供 AI 对照…"
-                                requestVision(orderBitmap, ocrEvidence, fareCheck)
+                                requestVision(orderBitmap, ocrEvidence, fareCheck, trace, "VISION_" + (index + 1))
                                 report.appendLine("已提交原图 + 2倍图、PP-OCRv6 + ML Kit 证据供 AI 对照；运费由本地核验结果约束")
                             } else {
                                 trace.event("VISION_" + (index + 1), "SKIPPED", details = JSONObject().put("reason", "all_ocr_empty"))
@@ -524,7 +524,8 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun requestVision(bitmap: Bitmap, ocr: String, fareCheck: FreightAmountExtractor.Result) {
+    private fun requestVision(bitmap: Bitmap, ocr: String, fareCheck: FreightAmountExtractor.Result,
+        trace: PipelineTrace? = null, traceLabel: String = "VISION") {
         val base = apiBase.text.toString().trim().trimEnd('/')
         val key = apiKey.text.toString().trim()
         val modelName = model.text.toString().trim()
@@ -533,10 +534,16 @@ class MainActivity : ComponentActivity() {
         }
         scope.launch {
             try {
+                val encodeStarted = trace?.mark()
                 val answer = withContext(Dispatchers.IO) {
                     val bytes = ByteArrayOutputStream()
-                    bitmap.compress(Bitmap.CompressFormat.JPEG, 82, bytes)
-                    val encoded = Base64.encodeToString(bytes.toByteArray(), Base64.NO_WRAP)
+                    val compressOk = bitmap.compress(Bitmap.CompressFormat.JPEG, 82, bytes)
+                    val jpegBytes = bytes.toByteArray()
+                    val encoded = Base64.encodeToString(jpegBytes, Base64.NO_WRAP)
+                    trace?.event(traceLabel + "_IMAGE_ENCODE", "SUCCESS", encodeStarted,
+                        JSONObject().put("compress_ok", compressOk).put("jpeg_bytes", jpegBytes.size)
+                            .put("base64_chars", encoded.length).put("width", bitmap.width).put("height", bitmap.height))
+                    val promptStarted = trace?.mark()
                     val prompt = """
 你是货运订单图片识别与备注结构化解析器。必须查看原始订单图片，并把 PP-OCRv6 与 ML Kit 的原始文本及文字框证据作为辅助。两套OCR都可能出错，不能把任一OCR文本当成事实；以图片中清晰可见的内容为准。
 核心字段包括用户出价/订单运费、车型车长、地址、时间、装卸数量。运费只认“用户出价”对应的金额；平台奖励（例如“多赚XX元”）完全忽略，不得写入运费，也不需要提取或比较。仔细核对金额小数点；图片无法确认用户出价时 freight_yuan 必须为null，并在unclear_items中注明。
@@ -573,26 +580,51 @@ class MainActivity : ComponentActivity() {
 OCR原文：
 $ocr
 """.trimIndent()
+                    trace?.event(traceLabel + "_PROMPT_BUILD", "SUCCESS", promptStarted,
+                        JSONObject().put("prompt_chars", prompt.length).put("ocr_chars", ocr.length))
+                    val bodyStarted = trace?.mark()
                     val content = JSONArray()
                         .put(JSONObject().put("type", "text").put("text", prompt))
                         .put(JSONObject().put("type", "image_url").put("image_url", JSONObject().put("url", "data:image/jpeg;base64,$encoded")))
                     val body = JSONObject().put("model", modelName)
                         .put("messages", JSONArray().put(JSONObject().put("role", "user").put("content", content)))
                         .put("temperature", 0.1)
+                    val bodyText = body.toString()
+                    trace?.event(traceLabel + "_REQUEST_BODY", "READY", bodyStarted,
+                        JSONObject().put("body_chars", bodyText.length).put("image_base64_chars", encoded.length)
+                            .put("model", modelName).put("contains_image", true))
                     val req = Request.Builder().url("$base/chat/completions")
                         .header("Authorization", "Bearer $key")
-                        .post(body.toString().toRequestBody("application/json".toMediaType())).build()
+                        .post(bodyText.toRequestBody("application/json".toMediaType())).build()
+                    val networkStarted = trace?.mark()
                     client.newCall(req).execute().use { response ->
                         val raw = response.body?.string().orEmpty()
+                        trace?.event(traceLabel + "_HTTP_RESPONSE", if (response.isSuccessful) "SUCCESS" else "HTTP_ERROR",
+                            networkStarted, JSONObject().put("http_code", response.code).put("response_chars", raw.length)
+                                .put("content_type", response.header("Content-Type") ?: "unknown"))
                         if (!response.isSuccessful) throw Exception("HTTP ${response.code}: $raw")
-                        JSONObject(raw).getJSONArray("choices").getJSONObject(0)
+                        val parseStarted = trace?.mark()
+                        val content = JSONObject(raw).getJSONArray("choices").getJSONObject(0)
                             .getJSONObject("message").optString("content", raw)
+                        trace?.event(traceLabel + "_RESPONSE_PARSE", "SUCCESS", parseStarted,
+                            JSONObject().put("answer_chars", content.length))
+                        content
                     }
                 }
-                val parsed = try { OrderRemarkAnalysis.parse(answer) } catch (_: Exception) { null }
+                val jsonStarted = trace?.mark()
+                val parsed = try { OrderRemarkAnalysis.parse(answer) } catch (e: Exception) {
+                    trace?.error(traceLabel + "_JSON_PARSE", jsonStarted, e); null
+                }
+                trace?.event(traceLabel + "_JSON_PARSE", if (parsed == null) "FAILED" else "SUCCESS",
+                    jsonStarted, JSONObject().put("parsed", parsed != null))
                 val structured = parsed?.copy(freightYuan = fareCheck.confirmedAmount)
                 output.append("\n\nAI备注解析原始响应：\n$answer")
                 if (structured != null) {
+                    trace?.event(traceLabel + "_FIELD_ASSIGNMENT", "SUCCESS", details = JSONObject()
+                        .put("local_freight_confirmed", fareCheck.confirmedAmount ?: JSONObject.NULL)
+                        .put("ai_freight_candidate", parsed.freightYuan ?: JSONObject.NULL)
+                        .put("final_freight", structured.freightYuan ?: JSONObject.NULL)
+                        .put("final_source", if (fareCheck.confirmedAmount != null) "LOCAL_OCR" else "UNCONFIRMED"))
                     output.append("\n\n本地运费核验：" + fareCheck.details + "\n" + structured.toDisplayText())
                     val vehicleConfig = OrderRuleConfig.load(getSharedPreferences("api_config", MODE_PRIVATE))
                     val matchReport = OrderRequirementMatcher.evaluate(structured, vehicleConfig)
