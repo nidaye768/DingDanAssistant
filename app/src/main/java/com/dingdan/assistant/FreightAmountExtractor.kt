@@ -4,6 +4,7 @@ import org.json.JSONObject
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
+import java.util.Locale
 
 /** Evidence-based extraction of the amount attached to "用户出价". */
 object FreightAmountExtractor {
