@@ -250,16 +250,17 @@ class MainActivity : ComponentActivity() {
             })
     }
 
-    private fun recognizeWithPaddle(bitmap: Bitmap): Pair<String, String> {
+    private suspend fun recognizeWithPaddle(bitmap: Bitmap): Pair<String, String> {
+        // PaddleOCR.create、recognize 均为 suspend API；调用方在 Dispatchers.IO 中执行。
         val engine = paddleOcr ?: run {
             System.loadLibrary("opencv_java4")
             check(OpenCVUtils.init(this)) { "OpenCVUtils 初始化失败" }
             PaddleOCR.create(this).also { paddleOcr = it }
         }
         val result = engine.recognize(bitmap)
-        val text = result.results.joinToString("\n") { it.text }.trim()
+        val recognizedText = result.results.joinToString("\n") { it.text }.trim()
         val details = "模型已加载｜检测 ${result.detectionTimeMs}ms｜识别 ${result.recognitionTimeMs}ms｜总计 ${result.totalTimeMs}ms｜文本行 ${result.lineCount}"
-        return text to details
+        recognizedText to details
     }
 
     private suspend fun <T> Task<T>.awaitResult(): T = kotlinx.coroutines.suspendCancellableCoroutine { c ->
@@ -358,8 +359,14 @@ class MainActivity : ComponentActivity() {
     override fun onDestroy() {
         super.onDestroy()
         scope.cancel()
-        try { paddleOcr?.release() } catch (_: Exception) { }
+        // release() 是 suspend API；Activity 销毁时转到独立 IO 协程释放，避免非法同步调用。
+        val engineToRelease = paddleOcr
         paddleOcr = null
+        if (engineToRelease != null) {
+            CoroutineScope(SupervisorJob() + Dispatchers.IO).launch {
+                try { engineToRelease.release() } catch (_: Exception) { }
+            }
+        }
         cameraExecutor.shutdown()
     }
 }
