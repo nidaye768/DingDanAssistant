@@ -46,7 +46,7 @@ object OrderDecisionEngine {
 
         fun countProblem(actual: Int?, mode: OrderRuleConfig.CountMode, limit: Int, label: String): Result? {
             if (actual == null) {
-                return if (facts.rules.unknownCountAction == OrderRuleConfig.UnknownAction.IGNORE)
+                return if (facts.rules.countIssueAction == OrderRuleConfig.UnknownAction.IGNORE)
                     Result(Verdict.IGNORE, null, null, null, listOf("$label数量未知，当前设置为忽略"))
                 else null
             }
