@@ -117,6 +117,41 @@ object AcceptanceSuite {
         check("无效模型JSON安全拒绝", malformedRemarkRejected,
             "模型输出不是有效JSON时不生成结构化结果")
 
+        val cleanRemark = OrderRemarkAnalysis(
+            vehicleType = "中面", vehicleLengthM = 3.0, vehicleVolumeM3 = null,
+            cargoName = "电子产品", cargoWeightKg = 800.0, cargoVolumeM3 = 5.0,
+            cargoLengthM = null, pickupCount = 1, deliveryCount = 1,
+            driverExtraCostYuan = 0.0, extraCostItems = emptyList(),
+            tollRequirement = null, arrivalTime = null, personnelRequirement = null,
+            loadingUnloading = "普通装卸", risks = emptyList(), unclearItems = emptyList(),
+            evidence = listOf("车型中面"), summary = "中面运输"
+        )
+        val suitableVehicle = OrderRuleConfig(
+            vehicleType = "中面", vehicleLengthM = 3.8, maxPayloadKg = 1000.0,
+            maxVolumeM3 = 8.0, hasTailboard = false
+        )
+        val matched = OrderRequirementMatcher.evaluate(cleanRemark, suitableVehicle)
+        check("AI订单要求与车辆档案匹配", matched.vehicleMatch == OrderDecisionEngine.Match.MATCHED,
+            "车型、车长、载重和容积均满足时返回MATCHED")
+
+        val overweight = OrderRequirementMatcher.evaluate(
+            cleanRemark.copy(cargoWeightKg = 2000.0), suitableVehicle
+        )
+        check("货物超出车辆载重识别", overweight.vehicleMatch == OrderDecisionEngine.Match.MISMATCHED,
+            "货物重量超过车辆额定载重时明确标记不匹配")
+
+        val missingVehicleProfile = OrderRequirementMatcher.evaluate(
+            cleanRemark, OrderRuleConfig()
+        )
+        check("车辆档案缺失不误判匹配", missingVehicleProfile.vehicleMatch == OrderDecisionEngine.Match.UNKNOWN,
+            "车型或车辆能力参数缺失时返回UNKNOWN")
+
+        val tailboardRemark = OrderRequirementMatcher.evaluate(
+            cleanRemark.copy(loadingUnloading = "需尾板车"), suitableVehicle
+        )
+        check("尾板要求与车辆配置核对", tailboardRemark.vehicleMatch == OrderDecisionEngine.Match.MISMATCHED,
+            "订单要求尾板而车辆档案未配置尾板时标记不匹配")
+
         check("API 地址格式检查", "https://example.com/v1".startsWith("https://"),
             "HTTPS 地址格式基础检查")
         return out
