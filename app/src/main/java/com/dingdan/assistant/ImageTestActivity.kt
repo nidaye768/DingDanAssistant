@@ -186,12 +186,16 @@ class ImageTestActivity : ComponentActivity() {
     }
 
     private fun autoSegment(bitmap: Bitmap) {
+        if (busy) return
+        setBusy(true)
         status.text = "正在加载 YOLO 模型并检测订单卡片…"
         scope.launch {
             try {
+                var yoloError = ""
                 val yolo = try {
                     withContext(Dispatchers.IO) { YoloOrderDetector.detect(this@ImageTestActivity, bitmap) }
                 } catch (e: Exception) {
+                    yoloError = e.localizedMessage ?: e.javaClass.simpleName
                     null
                 }
                 if (yolo != null && yolo.detections.isNotEmpty()) {
@@ -216,22 +220,25 @@ class ImageTestActivity : ComponentActivity() {
                     }
                     val cards = result.cards.take(8).map { it.bitmap }
                     val targets = if (cards.isEmpty()) listOf(bitmap) else cards
-                    val note = "YOLO 模型未检测到卡片或暂不可用，回退到红色标题栏规则。\n分割说明：" + result.reason +
+                    val note = "YOLO 未产出检测框，已回退到红色标题栏规则。" +
+                        if (yoloError.isNotBlank()) "\nYOLO异常：" + yoloError else "\nYOLO结果：未检测到目标" +
+                        "\n分割说明：" + result.reason +
                         "\n红色标题栏：" + result.headerBands.size + " 条；规则卡片：" + result.cards.size +
                         " 张。" + if (cards.isEmpty()) "\n未检测到卡片，改用整图 OCR 兜底。" else
                         "\n本轮最多处理前8张卡片。"
                     runPipeline(targets, if (cards.isEmpty()) "整图 OCR 兜底" else "规则回退分割（" + cards.size + "张）", bitmap, note)
                 }
             } catch (e: Exception) {
-                status.text = "自动分割失败：" + e.localizedMessage; setBusy(false)
+                status.text = "自动分割失败：" + e.localizedMessage
+                output.text = "自动检测未完成。\n异常：" + (e.localizedMessage ?: e.javaClass.simpleName)
+                setBusy(false)
             }
         }
     }
 
     /** Both sources share ML Kit Chinese OCR, optional vision API, and local report saving. */
     private fun runPipeline(targets: List<Bitmap>, kind: String, original: Bitmap?, note: String = "") {
-        if (busy) return
-        setBusy(true); status.text = "正在执行 OCR / 模型分析…"
+        setBusy(true); status.text = "已进入识别流程，准备 OCR…"
         scope.launch {
             val started = System.currentTimeMillis()
             val report = StringBuilder()
@@ -248,6 +255,7 @@ class ImageTestActivity : ComponentActivity() {
                 val model = prefs.getString("model", "").orEmpty().trim()
 
                 targets.forEachIndexed { index, bitmap ->
+                    status.text = "正在 OCR：第 ${index + 1}/${targets.size} 个区域…"
                     report.appendLine("\n========== 识别对象 " + (index + 1) + " ==========")
                     saved.add("target_" + (index + 1) + ".jpg" to bitmap)
                     val text = try {
@@ -256,14 +264,17 @@ class ImageTestActivity : ComponentActivity() {
                         failures++; report.appendLine("OCR失败：" + e.localizedMessage); ""
                     }
                     report.appendLine("OCR原始文本：\n" + if (text.isBlank()) "（无文字）" else text)
+                    output.text = report.toString() + "\n\n当前进度：OCR已完成，正在继续处理…"
                     if (base.isNotBlank() && key.isNotBlank() && model.isNotBlank() && text.isNotBlank()) {
                         try {
+                            status.text = "正在调用视觉模型复核：第 ${index + 1}/${targets.size} 个区域…"
                             val answer = withContext(Dispatchers.IO) { askVision(base, key, model, bitmap, text) }
                             report.appendLine("\n视觉模型分析：\n" + answer)
                         } catch (e: Exception) {
                             failures++; report.appendLine("\n模型调用失败：" + e.localizedMessage)
                         }
                     } else report.appendLine("\n视觉模型未调用：API配置不完整或OCR为空")
+                    output.text = report.toString() + "\n\n当前进度：" + (index + 1) + "/" + targets.size
                 }
                 report.appendLine("\n耗时：" + (System.currentTimeMillis() - started) + "ms")
                 report.appendLine("失败项：" + failures)
