@@ -312,15 +312,21 @@ class MainActivity : ComponentActivity() {
                             } catch (e: Exception) {
                                 "ML Kit辅助校验失败：" + (e.localizedMessage ?: e.javaClass.simpleName)
                             }
-                            val primaryText = ppText.ifBlank { mlKitText }
+                            val usableMlKitText = mlKitText.takeUnless { it.startsWith("ML Kit辅助校验失败：") }.orEmpty()
+                            val ocrEvidence = buildString {
+                                appendLine("【PP-OCRv6原始识别】")
+                                appendLine(if (ppText.isBlank()) "（无有效文本）" else ppText)
+                                appendLine("【ML Kit原始识别】")
+                                appendLine(if (usableMlKitText.isBlank()) "（无有效文本）" else usableMlKitText)
+                            }.trim()
                             report.appendLine("PP-OCRv6主引擎：\n" + if (ppText.isBlank()) "无有效文本" else ppText)
                             report.appendLine("PP-OCRv6运行信息：$ppDiagnostic")
                             report.appendLine("ML Kit辅助校验：\n" + mlKitText)
-                            if (primaryText.isNotBlank()) {
-                                status.text = "完整订单 ${index + 1}/${complete.size}：提交 AI 审核…"
-                                requestVision(orderBitmap, primaryText)
-                                report.appendLine("已提交 AI 备注解析（只针对 YOLO class 0 完整订单）")
-                            } else report.appendLine("OCR为空：跳过AI调用")
+                            if (ppText.isNotBlank() || usableMlKitText.isNotBlank()) {
+                                status.text = "完整订单 ${index + 1}/${complete.size}：提交双引擎证据供 AI 对照…"
+                                requestVision(orderBitmap, ocrEvidence)
+                                report.appendLine("已提交原图 + PP-OCRv6 + ML Kit 双引擎文本，供 AI 交叉核对（只针对 YOLO class 0 完整订单）")
+                            } else report.appendLine("两套OCR均为空：跳过AI调用")
                             output.text = report.toString()
                         }
                         status.text = "完整订单识别完成：${complete.size} 张｜部分订单已跳过"
@@ -411,7 +417,9 @@ class MainActivity : ComponentActivity() {
                     bitmap.compress(Bitmap.CompressFormat.JPEG, 82, bytes)
                     val encoded = Base64.encodeToString(bytes.toByteArray(), Base64.NO_WRAP)
                     val prompt = """
-你是货运订单备注结构化解析器。只根据图片和OCR原文提取信息，不得补全、推断或猜测。
+你是货运订单图片识别与备注结构化解析器。必须同时查看原始订单图片，并交叉比较下方 PP-OCRv6 与 ML Kit 两套OCR文本。两套OCR都可能出错，不能默认PP-OCRv6优先，也不能把任一OCR文本当成事实；以图片中清晰可见的内容为准。
+关键字段（尤其运费/用户出价/多赚金额、车型车长、地址、时间、装卸数量）必须逐项对照图片。金额标签必须区分：“多赚XX元”不是“用户出价XX元”，不得混为同一个金额；仔细核对小数点，不能把61.6识别成616或6.16，也不能把42识别成4.2。
+如果图片本身也无法清楚确认，相关字段必须保持null，并在unclear_items中写明冲突原文及“需人工核实”，不得自行猜测或按某一OCR引擎强行定值。
 必须只返回一个合法JSON对象，不要Markdown代码围栏或JSON以外的说明。
 无法确认的字符串、数字和数量一律返回null；数组没有明确内容时返回空数组。
 司机额外成本只有在明确说明由司机承担且金额明确时才填写driver_extra_cost_yuan，否则必须为null，不能把高速费、过路费或其他费用默认成0。
