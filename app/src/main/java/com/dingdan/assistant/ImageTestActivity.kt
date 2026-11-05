@@ -201,38 +201,34 @@ class ImageTestActivity : ComponentActivity() {
                     yoloError = e.localizedMessage ?: e.javaClass.simpleName
                     null
                 }
-                if (yolo != null && yolo.detections.isNotEmpty()) {
-                    val detections = yolo.detections.take(8)
-                    preview.setDetections(detections)
-                    val targets = detections.map { YoloOrderDetector.crop(bitmap, it) }
-                    val note = buildString {
-                        appendLine("检测引擎：YOLO11n ONNX（本机推理）")
-                        appendLine("模型路径：缓存目录 / models/dingdan_yolo11n.onnx")
-                        appendLine("推理耗时：${yolo.inferenceMs} ms")
-                        appendLine("检测框数量：${yolo.detections.size}")
-                        detections.forEachIndexed { index, item ->
-                            appendLine("框 ${index + 1}：${item.className}｜置信度 ${"%.1f".format(item.confidence * 100)}%｜位置 x=${"%.3f".format(item.left)}, y=${"%.3f".format(item.top)}, w=${"%.3f".format(item.right-item.left)}, h=${"%.3f".format(item.bottom-item.top)}")
-                        }
-                        appendLine("本轮最多处理前8个检测框；部分露出卡片会单独标记，不直接视为完整订单。")
-                    }
-                    runPipeline(targets, "YOLO 自动检测（${targets.size}张）", bitmap, note)
-                } else {
+                if (yolo == null) {
                     preview.setDetections(emptyList())
-                    val result = withContext(Dispatchers.Default) {
-                        OrderCardSegmenter.process(bitmap, OrderCardSegmenter.Config(
-                            screenRoi = OrderCardSegmenter.NormalizedRect(0f, 0f, 1f, 1f)
-                        ))
-                    }
-                    val cards = result.cards.take(8).map { it.bitmap }
-                    val targets = if (cards.isEmpty()) listOf(bitmap) else cards
-                    val note = "YOLO 未产出检测框，已回退到红色标题栏规则。" +
-                        if (yoloError.isNotBlank()) "\nYOLO异常：" + yoloError else "\nYOLO结果：未检测到目标" +
-                        "\n分割说明：" + result.reason +
-                        "\n红色标题栏：" + result.headerBands.size + " 条；规则卡片：" + result.cards.size +
-                        " 张。" + if (cards.isEmpty()) "\n未检测到卡片，改用整图 OCR 兜底。" else
-                        "\n本轮最多处理前8张卡片。"
-                    runPipeline(targets, if (cards.isEmpty()) "整图 OCR 兜底" else "规则回退分割（" + cards.size + "张）", bitmap, note)
+                    output.text = "YOLO检测失败，已阻止自动 OCR/AI 审核。\n原因：$yoloError\n请检查模型文件或网络后重试。"
+                    status.text = "YOLO不可用｜自动审核已暂停"
+                    return@launch
                 }
+                val detections = yolo.detections
+                preview.setDetections(detections)
+                val complete = detections.filter { it.classId == 0 }.take(8)
+                val partialCount = detections.count { it.classId == 1 }
+                val note = buildString {
+                    appendLine("检测引擎：YOLO11n ONNX（本机推理）")
+                    appendLine("模型路径：缓存目录 / models/dingdan_yolo11n.onnx")
+                    appendLine("推理耗时：${yolo.inferenceMs} ms")
+                    appendLine("检测框总数：${detections.size}")
+                    appendLine("完整订单：${complete.size} 张｜部分露出：$partialCount 张")
+                    detections.forEachIndexed { index, item ->
+                        appendLine("框 ${index + 1}：${item.className}｜置信度 ${"%.1f".format(item.confidence * 100)}%｜位置 x=${"%.3f".format(item.left)}, y=${"%.3f".format(item.top)}, w=${"%.3f".format(item.right-item.left)}, h=${"%.3f".format(item.bottom-item.top)}")
+                    }
+                    appendLine("仅 class 0（完整订单）允许进入 OCR/AI；class 1（部分露出）只显示检测框，不审核。")
+                }
+                if (complete.isEmpty()) {
+                    output.text = note + "\n本次没有完整订单，已跳过 OCR 和 AI 审核。"
+                    status.text = if (partialCount > 0) "仅有部分露出订单｜已跳过审核" else "未检测到订单｜已跳过审核"
+                    return@launch
+                }
+                val targets = complete.map { YoloOrderDetector.crop(bitmap, it) }
+                runPipeline(targets, "YOLO完整订单审核（${targets.size}张）", bitmap, note)
             } catch (e: Exception) {
                 status.text = "自动分割失败：" + e.localizedMessage
                 output.text = "自动检测未完成。\n异常：" + (e.localizedMessage ?: e.javaClass.simpleName)
