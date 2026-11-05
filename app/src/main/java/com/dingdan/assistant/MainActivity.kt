@@ -260,7 +260,7 @@ class MainActivity : ComponentActivity() {
         val result = engine.recognize(bitmap)
         val recognizedText = result.results.joinToString("\n") { it.text }.trim()
         val details = "模型已加载｜检测 ${result.detectionTimeMs}ms｜识别 ${result.recognitionTimeMs}ms｜总计 ${result.totalTimeMs}ms｜文本行 ${result.lineCount}"
-        recognizedText to details
+        return recognizedText to details
     }
 
     private suspend fun <T> Task<T>.awaitResult(): T = kotlinx.coroutines.suspendCancellableCoroutine { c ->
