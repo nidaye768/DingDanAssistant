@@ -5,9 +5,9 @@ import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
-import com.microsoft.onnxruntime.OnnxTensor
-import com.microsoft.onnxruntime.OrtEnvironment
-import com.microsoft.onnxruntime.OrtSession
+import ai.onnxruntime.OnnxTensor
+import ai.onnxruntime.OrtEnvironment
+import ai.onnxruntime.OrtSession
 import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
