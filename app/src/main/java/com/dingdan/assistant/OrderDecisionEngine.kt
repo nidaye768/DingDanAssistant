@@ -53,7 +53,7 @@ object OrderDecisionEngine {
             }
             if (!facts.rules.allowsCount(actual, mode, limit)) {
                 val message = "$label数量为 $actual，不符合当前设置（${mode.name} $limit）"
-                return if (facts.rules.countIssueAction == OrderRuleConfig.UnknownAction.IGNORE)
+                return if (facts.rules.mismatchCountAction == OrderRuleConfig.UnknownAction.IGNORE)
                     Result(Verdict.IGNORE, null, null, null, listOf(message))
                 else Result(Verdict.PENDING, null, null, null, listOf(message))
             }
