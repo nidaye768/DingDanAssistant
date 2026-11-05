@@ -245,16 +245,24 @@ class ImageTestActivity : ComponentActivity() {
         scope.launch {
             val started = System.currentTimeMillis()
             val report = StringBuilder()
+            val trace = PipelineTrace(this@ImageTestActivity, "image_test", JSONObject()
+                .put("kind", kind).put("target_count", targets.size)
+                .put("original_width", original?.width ?: JSONObject.NULL)
+                .put("original_height", original?.height ?: JSONObject.NULL))
             val saved = mutableListOf<Pair<String, Bitmap>>()
             var failures = 0
             var paddle: PaddleOCR? = null
             var paddleInitError = ""
             val recognizer = TextRecognition.getClient(ChineseTextRecognizerOptions.Builder().build())
             try {
+                report.appendLine("执行追踪编号：" + trace.runId)
+                report.appendLine("本机流程日志：" + trace.path())
                 report.appendLine("测试类型：" + kind)
                 report.appendLine("时间：" + formatTime(started))
                 report.appendLine("OCR策略：PP-OCRv6 + ML Kit 双引擎交叉核对；两者原始结果都提供给视觉模型，不再只把 PP 结果当作 AI 的 OCR 依据。")
                 if (note.isNotBlank()) report.appendLine(note)
+                val initStarted = trace.mark()
+                trace.event("OCR_ENGINE_INIT", "START")
                 try {
                     // Load the native library directly first so Android's real linker error is preserved.
                     try {
@@ -265,9 +273,12 @@ class ImageTestActivity : ComponentActivity() {
                     check(OpenCVUtils.init(this@ImageTestActivity)) { "OpenCVUtils 初始化失败（opencv_java4 已尝试加载）" }
                     val loadedPaddle = PaddleOCR.create(this@ImageTestActivity)
                     paddle = loadedPaddle
+                    trace.event("PP_OCR_INIT", "SUCCESS", initStarted,
+                        JSONObject().put("cold_load_time_ms", loadedPaddle.coldLoadTimeMs))
                     report.appendLine("PP-OCRv6 初始化：成功｜模型加载耗时 ${loadedPaddle.coldLoadTimeMs} ms")
                 } catch (e: Exception) {
                     paddleInitError = e.localizedMessage ?: e.javaClass.simpleName
+                    trace.error("PP_OCR_INIT", initStarted, e)
                     report.appendLine("PP-OCRv6 初始化失败：$paddleInitError")
                 }
                 val prefs = getSharedPreferences("api_config", MODE_PRIVATE)
@@ -279,10 +290,18 @@ class ImageTestActivity : ComponentActivity() {
                     status.text = "正在 OCR：第 ${index + 1}/${targets.size} 个区域…"
                     report.appendLine("\n========== 识别对象 " + (index + 1) + " ==========")
                     saved.add("target_" + (index + 1) + ".jpg" to bitmap)
+                    val mlStarted = trace.mark()
+                    trace.event("OCR_ML_ORIGINAL_" + (index + 1), "START",
+                        details = JSONObject().put("width", bitmap.width).put("height", bitmap.height))
                     val mlKitResult = try {
-                        recognizer.process(InputImage.fromBitmap(bitmap, 0)).awaitResult()
+                        recognizer.process(InputImage.fromBitmap(bitmap, 0)).awaitResult().also {
+                            trace.event("OCR_ML_ORIGINAL_" + (index + 1), "SUCCESS", mlStarted,
+                                JSONObject().put("text_length", it.text.length).put("text_preview", it.text.take(400))
+                                    .put("line_count", it.textBlocks.sumOf { block -> block.lines.size }))
+                        }
                     } catch (e: Exception) {
-                        failures++; report.appendLine("ML Kit OCR失败：" + e.localizedMessage); null
+                        failures++; trace.error("OCR_ML_ORIGINAL_" + (index + 1), mlStarted, e)
+                        report.appendLine("ML Kit OCR失败：" + e.localizedMessage); null
                     }
                     val text = mlKitResult?.text.orEmpty()
                     val mlKitEvidence = mlKitResult?.let { serializeMlKitEvidence(it) }.orEmpty()
@@ -291,6 +310,8 @@ class ImageTestActivity : ComponentActivity() {
                     report.appendLine("文字框/置信度 JSON：\n" + if (mlKitEvidence.isBlank()) "不可用" else mlKitEvidence)
                     var ppPrimaryText = ""
                     var ppPrimaryEvidence = ""
+                    val ppStarted = trace.mark()
+                    trace.event("OCR_PP_ORIGINAL_" + (index + 1), "START")
                     try {
                         val pp = paddle
                         if (pp == null) {
@@ -298,6 +319,11 @@ class ImageTestActivity : ComponentActivity() {
                         } else {
                             status.text = "正在运行 PP-OCRv6：第 ${index + 1}/${targets.size} 个区域…"
                             val ppResult = pp.recognize(bitmap)
+                            trace.event("OCR_PP_ORIGINAL_" + (index + 1), "SUCCESS", ppStarted,
+                                JSONObject().put("wall_time_ms", ppResult.totalTimeMs)
+                                    .put("detection_ms", ppResult.detectionTimeMs)
+                                    .put("recognition_ms", ppResult.recognitionTimeMs)
+                                    .put("line_count", ppResult.lineCount))
                             ppPrimaryText = ppResult.results.joinToString("\n") { it.text }.trim()
                             ppPrimaryEvidence = ppResult.results.joinToString("\n") { line ->
                                 val points = line.box.points.joinToString(" ") { "(${it.x.toInt()},${it.y.toInt()})" }
@@ -317,36 +343,64 @@ class ImageTestActivity : ComponentActivity() {
                         }
                     } catch (e: Exception) {
                         failures++
+                        trace.error("OCR_PP_ORIGINAL_" + (index + 1), ppStarted, e)
                         report.appendLine("\n【PP-OCRv6】识别失败：" + (e.localizedMessage ?: e.javaClass.simpleName))
                     }
+                    val scaleStarted = trace.mark()
                     val twoX = Bitmap.createScaledBitmap(bitmap, bitmap.width * 2, bitmap.height * 2, true)
+                    trace.event("UPSCALE_2X_" + (index + 1), "SUCCESS", scaleStarted,
+                        JSONObject().put("width", twoX.width).put("height", twoX.height)
+                            .put("allocation_bytes_estimate", twoX.width.toLong() * twoX.height * 4L))
                     var pp2xText = ""
                     var pp2xEvidence = ""
+                    val pp2xStarted = trace.mark()
+                    trace.event("OCR_PP_2X_" + (index + 1), "START")
                     val pp2xError = try {
                         val pp = paddle ?: throw IllegalStateException(paddleInitError.ifBlank { "PP-OCR未初始化" })
                         val result2x = pp.recognize(twoX)
+                        trace.event("OCR_PP_2X_" + (index + 1), "SUCCESS", pp2xStarted,
+                            JSONObject().put("wall_time_ms", result2x.totalTimeMs)
+                                .put("detection_ms", result2x.detectionTimeMs)
+                                .put("recognition_ms", result2x.recognitionTimeMs)
+                                .put("line_count", result2x.lineCount))
                         pp2xText = result2x.results.joinToString("\n") { row -> row.text }.trim()
                         pp2xEvidence = result2x.results.joinToString(" || ") { row ->
                             val points = row.box.points.joinToString(" ") { point -> "(" + point.x.toInt() + "," + point.y.toInt() + ")" }
                             "text=" + row.text + "; confidence=" + "%.3f".format(Locale.US, row.confidence) + "; points=" + points
                         }
                         ""
-                    } catch (e: Exception) { e.localizedMessage ?: e.javaClass.simpleName }
+                    } catch (e: Exception) {
+                        trace.error("OCR_PP_2X_" + (index + 1), pp2xStarted, e)
+                        e.localizedMessage ?: e.javaClass.simpleName
+                    }
                     var ml2xText = ""
                     var ml2xEvidence = "{}"
+                    val ml2xStarted = trace.mark()
+                    trace.event("OCR_ML_2X_" + (index + 1), "START")
                     val ml2xError = try {
                         val result2x = recognizer.process(InputImage.fromBitmap(twoX, 0)).awaitResult()
                         ml2xText = result2x.text
                         ml2xEvidence = serializeMlKitEvidence(result2x)
+                        trace.event("OCR_ML_2X_" + (index + 1), "SUCCESS", ml2xStarted,
+                            JSONObject().put("text_length", ml2xText.length).put("text_preview", ml2xText.take(400)))
                         ""
-                    } catch (e: Exception) { e.localizedMessage ?: e.javaClass.simpleName }
+                    } catch (e: Exception) {
+                        trace.error("OCR_ML_2X_" + (index + 1), ml2xStarted, e)
+                        e.localizedMessage ?: e.javaClass.simpleName
+                    }
                     twoX.recycle()
+                    val parseStarted = trace.mark()
+                    trace.event("FREIGHT_PARSE_" + (index + 1), "START")
                     val fareCheck = FreightAmountExtractor.resolve(listOf(
                         FreightAmountExtractor.fromPp(ppPrimaryText, ppPrimaryEvidence, "original", "PP-OCR"),
                         FreightAmountExtractor.fromMl(mlKitEvidence, "original", "ML Kit"),
                         FreightAmountExtractor.fromPp(pp2xText, pp2xEvidence, "upscale_2x", "PP-OCR"),
                         FreightAmountExtractor.fromMl(ml2xEvidence, "upscale_2x", "ML Kit")
                     ))
+                    trace.event("FREIGHT_PARSE_" + (index + 1), fareCheck.state, parseStarted,
+                        JSONObject().put("confirmed_amount", fareCheck.confirmedAmount ?: JSONObject.NULL)
+                            .put("candidate_count", fareCheck.candidates.size).put("details", fareCheck.details)
+                            .put("pp2x_error", pp2xError).put("ml2x_error", ml2xError))
                     output.text = report.toString() + "\n\n当前进度：四路 OCR 金额核验已运行…"
                     val visionOcrText = buildString {
                         appendLine("【原图 PP-OCRv6】")
@@ -369,8 +423,19 @@ class ImageTestActivity : ComponentActivity() {
                         (ppPrimaryText.isNotBlank() || text.isNotBlank() || pp2xText.isNotBlank() || ml2xText.isNotBlank())) {
                         try {
                             status.text = "正在调用视觉模型复核：第 " + (index + 1) + "/" + targets.size + " 个区域…"
+                            val aiStarted = trace.mark()
+                            trace.event("VISION_REQUEST_" + (index + 1), "START",
+                                details = JSONObject().put("image_width", bitmap.width).put("image_height", bitmap.height)
+                                    .put("ocr_chars", visionOcrText.length).put("model", model))
                             val answer = withContext(Dispatchers.IO) { askVision(base, key, model, bitmap, visionOcrText, fareCheck) }
-                            val parsed = try { OrderRemarkAnalysis.parse(answer) } catch (_: Exception) { null }
+                            trace.event("VISION_REQUEST_" + (index + 1), "SUCCESS", aiStarted,
+                                JSONObject().put("response_chars", answer.length))
+                            val jsonParseStarted = trace.mark()
+                            val parsed = try { OrderRemarkAnalysis.parse(answer) } catch (e: Exception) {
+                                trace.error("AI_JSON_PARSE_" + (index + 1), jsonParseStarted, e); null
+                            }
+                            trace.event("AI_JSON_PARSE_" + (index + 1), if (parsed == null) "FAILED" else "SUCCESS",
+                                jsonParseStarted, JSONObject().put("parsed", parsed != null))
                             val structured = parsed?.copy(freightYuan = fareCheck.confirmedAmount)
                             report.appendLine("\nAI备注解析原始响应：\n" + answer)
                             if (structured != null) {
@@ -388,6 +453,10 @@ class ImageTestActivity : ComponentActivity() {
                     } else report.appendLine("\n视觉模型未调用：API配置不完整或OCR为空")
                     output.text = report.toString() + "\n\n当前进度：" + (index + 1) + "/" + targets.size
                 }
+                trace.finish(if (failures == 0) "SUCCESS" else "COMPLETED_WITH_ERRORS",
+                    JSONObject().put("target_count", targets.size).put("failures", failures))
+                report.appendLine("\n执行追踪编号：" + trace.runId)
+                report.appendLine("本机流程日志：" + trace.path())
                 report.appendLine("\n耗时：" + (System.currentTimeMillis() - started) + "ms")
                 report.appendLine("失败项：" + failures)
                 report.appendLine("注意：模型提取结果不是最终接单决策；本Demo不自动抢单。")
@@ -397,6 +466,7 @@ class ImageTestActivity : ComponentActivity() {
                     if (original != null) saveImage(original, File(folder, "original.jpg"))
                     saved.forEach { pair -> saveImage(pair.second, File(folder, pair.first)) }
                     File(folder, "report.txt").writeText(report.toString(), Charsets.UTF_8)
+                    runCatching { File(trace.path()).copyTo(File(folder, "pipeline_trace.jsonl"), overwrite = true) }
                     folder
                 }
                 output.text = report.toString() + "\n\n记录已保存：" + dir.name
