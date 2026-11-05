@@ -205,6 +205,7 @@ class ImageTestActivity : ComponentActivity() {
                     preview.setDetections(emptyList())
                     output.text = "YOLO检测失败，已阻止自动 OCR/AI 审核。\n原因：$yoloError\n请检查模型文件或网络后重试。"
                     status.text = "YOLO不可用｜自动审核已暂停"
+                    setBusy(false)
                     return@launch
                 }
                 val detections = yolo.detections
@@ -225,6 +226,7 @@ class ImageTestActivity : ComponentActivity() {
                 if (complete.isEmpty()) {
                     output.text = note + "\n本次没有完整订单，已跳过 OCR 和 AI 审核。"
                     status.text = if (partialCount > 0) "仅有部分露出订单｜已跳过审核" else "未检测到订单｜已跳过审核"
+                    setBusy(false)
                     return@launch
                 }
                 val targets = complete.map { YoloOrderDetector.crop(bitmap, it) }
