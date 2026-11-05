@@ -319,7 +319,10 @@ class ImageTestActivity : ComponentActivity() {
                         try {
                             status.text = "正在调用视觉模型复核：第 ${index + 1}/${targets.size} 个区域…"
                             val answer = withContext(Dispatchers.IO) { askVision(base, key, model, bitmap, visionOcrText) }
-                            report.appendLine("\n视觉模型分析：\n" + answer)
+                            val structured = try { OrderRemarkAnalysis.parse(answer) } catch (_: Exception) { null }
+                            report.appendLine("\nAI备注解析原始响应：\n" + answer)
+                            if (structured != null) report.appendLine("\n" + structured.toDisplayText())
+                            else report.appendLine("\n结构化解析失败：模型未返回有效JSON，本次不生成自动接单结论。")
                         } catch (e: Exception) {
                             failures++; report.appendLine("\n模型调用失败：" + e.localizedMessage)
                         }
@@ -363,7 +366,39 @@ class ImageTestActivity : ComponentActivity() {
             if (scaled !== bitmap) scaled.recycle()
             android.util.Base64.encodeToString(bytes.toByteArray(), android.util.Base64.NO_WRAP)
         }
-        val prompt = "你是货运订单信息提取助手。提取报价、车型、起终点、货物、重量、体积、尺寸、装卸、时间、费用、人员、动力类型和限制。保留备注原文；区分明确事实、推断、歧义、未知。关键数字、车型、地址或限制看不清时标记unknown，不得猜测或擅自纠错。只提取信息，不替司机接单。\nOCR文本：\n" + ocr
+        val prompt = """
+你是货运订单备注结构化解析器。只根据图片和OCR原文提取信息，不得补全、推断或猜测。
+必须只返回一个合法JSON对象，不要Markdown代码围栏或JSON以外的说明。
+无法确认的字符串、数字和数量一律返回null；数组没有明确内容时返回空数组。
+司机额外成本只有在明确说明由司机承担且金额明确时才填写driver_extra_cost_yuan，否则必须为null，不能把高速费、过路费或其他费用默认成0。
+装货点/卸货点数量只有明确能数清时才填写；“一装一卸”可分别填1。
+风险和不确定项必须单独列出；每个关键结论尽可能提供原文依据。
+字段必须严格使用以下结构：
+{
+  "vehicle_type": null,
+  "vehicle_length_m": null,
+  "vehicle_volume_m3": null,
+  "cargo_name": null,
+  "cargo_weight_kg": null,
+  "cargo_volume_m3": null,
+  "cargo_length_m": null,
+  "pickup_count": null,
+  "delivery_count": null,
+  "driver_extra_cost_yuan": null,
+  "extra_cost_items": [],
+  "toll_requirement": null,
+  "arrival_time": null,
+  "personnel_requirement": null,
+  "loading_unloading": null,
+  "risks": [],
+  "unclear_items": [],
+  "evidence": [],
+  "summary": ""
+}
+单位统一：重量kg、长度米、体积立方米、金额人民币元。不能把货物重量误认为车辆额定载重，也不能把货物体积误认为车辆容积。
+OCR原文：
+$ocr
+""".trimIndent()
         val content = JSONArray()
             .put(JSONObject().put("type", "text").put("text", prompt))
             .put(JSONObject().put("type", "image_url").put("image_url",
