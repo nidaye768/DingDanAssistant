@@ -16,6 +16,7 @@ import android.widget.TextView
 import androidx.activity.ComponentActivity
 import androidx.activity.result.contract.ActivityResultContracts
 import com.dingdan.assistant.vision.OrderCardSegmenter
+import com.dingdan.assistant.vision.YoloOrderDetector
 import com.google.android.gms.tasks.Task
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.text.TextRecognition
@@ -149,21 +150,42 @@ class ImageTestActivity : ComponentActivity() {
     }
 
     private fun autoSegment(bitmap: Bitmap) {
-        status.text = "正在检测红色标题栏并分割…"
+        status.text = "正在加载 YOLO 模型并检测订单卡片…"
         scope.launch {
             try {
-                val result = withContext(Dispatchers.Default) {
-                    OrderCardSegmenter.process(bitmap, OrderCardSegmenter.Config(
-                        screenRoi = OrderCardSegmenter.NormalizedRect(0f, 0f, 1f, 1f)
-                    ))
+                val yolo = try {
+                    withContext(Dispatchers.IO) { YoloOrderDetector.detect(this@ImageTestActivity, bitmap) }
+                } catch (e: Exception) {
+                    null
                 }
-                val cards = result.cards.take(8).map { it.bitmap }
-                val targets = if (cards.isEmpty()) listOf(bitmap) else cards
-                val note = "分割说明：" + result.reason + "\n红色标题栏：" +
-                    result.headerBands.size + " 条；检测卡片：" + result.cards.size +
-                    " 张。" + if (cards.isEmpty()) "\n未检测到卡片，改用整图 OCR 兜底。" else
-                    "\n本轮最多处理前8张卡片。"
-                runPipeline(targets, if (cards.isEmpty()) "整图 OCR 兜底" else "整图自动分割（" + cards.size + "张）", bitmap, note)
+                if (yolo != null && yolo.detections.isNotEmpty()) {
+                    val detections = yolo.detections.take(8)
+                    val targets = detections.map { YoloOrderDetector.crop(bitmap, it) }
+                    val note = buildString {
+                        appendLine("检测引擎：YOLO11n ONNX（本机推理）")
+                        appendLine("模型路径：缓存目录 / models/dingdan_yolo11n.onnx")
+                        appendLine("推理耗时：${yolo.inferenceMs} ms")
+                        appendLine("检测框数量：${yolo.detections.size}")
+                        detections.forEachIndexed { index, item ->
+                            appendLine("框 ${index + 1}：${item.className}｜置信度 ${"%.1f".format(item.confidence * 100)}%")
+                        }
+                        appendLine("本轮最多处理前8个检测框；部分露出卡片会单独标记，不直接视为完整订单。")
+                    }
+                    runPipeline(targets, "YOLO 自动检测（${targets.size}张）", bitmap, note)
+                } else {
+                    val result = withContext(Dispatchers.Default) {
+                        OrderCardSegmenter.process(bitmap, OrderCardSegmenter.Config(
+                            screenRoi = OrderCardSegmenter.NormalizedRect(0f, 0f, 1f, 1f)
+                        ))
+                    }
+                    val cards = result.cards.take(8).map { it.bitmap }
+                    val targets = if (cards.isEmpty()) listOf(bitmap) else cards
+                    val note = "YOLO 模型未检测到卡片或暂不可用，回退到红色标题栏规则。\n分割说明：" + result.reason +
+                        "\n红色标题栏：" + result.headerBands.size + " 条；规则卡片：" + result.cards.size +
+                        " 张。" + if (cards.isEmpty()) "\n未检测到卡片，改用整图 OCR 兜底。" else
+                        "\n本轮最多处理前8张卡片。"
+                    runPipeline(targets, if (cards.isEmpty()) "整图 OCR 兜底" else "规则回退分割（" + cards.size + "张）", bitmap, note)
+                }
             } catch (e: Exception) {
                 status.text = "自动分割失败：" + e.localizedMessage; setBusy(false)
             }
