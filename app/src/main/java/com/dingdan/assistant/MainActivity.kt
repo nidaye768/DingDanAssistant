@@ -333,12 +333,13 @@ class MainActivity : ComponentActivity() {
                             trace.event("OCR_ML_ORIGINAL_" + (index + 1), "START")
                             val mlKitResult = try {
                                 val recognizer = TextRecognition.getClient(ChineseTextRecognizerOptions.Builder().build())
-                                try { recognizer.process(InputImage.fromBitmap(orderBitmap, 0)).awaitResult() }
+                                val result = try { recognizer.process(InputImage.fromBitmap(orderBitmap, 0)).awaitResult() }
                                 finally { recognizer.close() }
-                            }.also { trace.event("OCR_ML_ORIGINAL_" + (index + 1), "SUCCESS", mlStarted,
-                                JSONObject().put("text_length", it.text.length).put("text_preview", it.text.take(300))
-                                    .put("line_count", it.textBlocks.sumOf { block -> block.lines.size })) }
-                            catch (e: Exception) {
+                                trace.event("OCR_ML_ORIGINAL_" + (index + 1), "SUCCESS", mlStarted,
+                                    JSONObject().put("text_length", result.text.length).put("text_preview", result.text.take(300))
+                                        .put("line_count", result.textBlocks.sumOf { block -> block.lines.size }))
+                                result
+                            } catch (e: Exception) {
                                 trace.error("OCR_ML_ORIGINAL_" + (index + 1), mlStarted, e)
                                 mlKitError = e.localizedMessage ?: e.javaClass.simpleName
                                 null
