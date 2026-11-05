@@ -294,11 +294,11 @@ class ImageTestActivity : ComponentActivity() {
                     trace.event("OCR_ML_ORIGINAL_" + (index + 1), "START",
                         details = JSONObject().put("width", bitmap.width).put("height", bitmap.height))
                     val mlKitResult = try {
-                        recognizer.process(InputImage.fromBitmap(bitmap, 0)).awaitResult().also {
-                            trace.event("OCR_ML_ORIGINAL_" + (index + 1), "SUCCESS", mlStarted,
-                                JSONObject().put("text_length", it.text.length).put("text_preview", it.text.take(400))
-                                    .put("line_count", it.textBlocks.sumOf { block -> block.lines.size }))
-                        }
+                        val mlResult = recognizer.process(InputImage.fromBitmap(bitmap, 0)).awaitResult()
+                        trace.event("OCR_ML_ORIGINAL_" + (index + 1), "SUCCESS", mlStarted,
+                            JSONObject().put("text_length", mlResult.text.length).put("text_preview", mlResult.text.take(400))
+                                .put("line_count", mlResult.textBlocks.sumOf { block -> block.lines.size }))
+                        mlResult
                     } catch (e: Exception) {
                         failures++; trace.error("OCR_ML_ORIGINAL_" + (index + 1), mlStarted, e)
                         report.appendLine("ML Kit OCR失败：" + e.localizedMessage); null
