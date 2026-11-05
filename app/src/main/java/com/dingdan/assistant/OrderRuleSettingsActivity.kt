@@ -57,11 +57,16 @@ class OrderRuleSettingsActivity : ComponentActivity() {
         val unknownAction = spinner(listOf("待确认（默认）", "忽略订单"),
             if (config.unknownCountAction == OrderRuleConfig.UnknownAction.IGNORE) 1 else 0)
         root.addView(unknownAction)
+        val minRate = field("最低载货公里单价（元/km）", config.minYuanPerLoadedKm?.toString().orEmpty())
+        root.addView(label("收益门槛"))
+        root.addView(minRate)
         val maxExtra = field("司机额外成本上限（元，留空不限制）", config.maxDriverExtraCostYuan?.toString().orEmpty())
         root.addView(label("司机额外成本限制"))
         root.addView(maxExtra)
         root.addView(label("我的车辆参数"))
-        val vehicleType = field("车型，例如中面/厢式高栏", config.vehicleType, false)
+        val vehicleType = field("车型，例如中面/厢式高栏", config.vehicleType, false).apply {
+            inputType = android.text.InputType.TYPE_CLASS_TEXT
+        }
         val vehicleLength = field("车辆长度（米）", config.vehicleLengthM?.toString().orEmpty())
         val payload = field("车辆额定载重（kg）", config.maxPayloadKg?.toString().orEmpty())
         val volume = field("车辆可用容积（方）", config.maxVolumeM3?.toString().orEmpty())
@@ -90,6 +95,7 @@ class OrderRuleSettingsActivity : ComponentActivity() {
                         OrderRuleConfig.UnknownAction.PENDING else OrderRuleConfig.UnknownAction.IGNORE,
                     unknownCountAction = if (unknownAction.selectedItemPosition == 1)
                         OrderRuleConfig.UnknownAction.IGNORE else OrderRuleConfig.UnknownAction.PENDING,
+                    minYuanPerLoadedKm = minRate.text.toString().toDoubleOrNull()?.takeIf { it >= 0.0 },
                     maxDriverExtraCostYuan = maxExtra.text.toString().toDoubleOrNull()?.takeIf { it >= 0.0 },
                     vehicleType = vehicleType.text.toString().trim(),
                     vehicleLengthM = vehicleLength.text.toString().toDoubleOrNull()?.takeIf { it > 0.0 },
