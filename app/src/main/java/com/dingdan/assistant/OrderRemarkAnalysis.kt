@@ -15,6 +15,8 @@ data class OrderRemarkAnalysis(
     val cargoWeightKg: Double?,
     val cargoVolumeM3: Double?,
     val cargoLengthM: Double?,
+    val freightYuan: Double?,
+    val extraRewardYuan: Double?,
     val pickupCount: Int?,
     val deliveryCount: Int?,
     val driverExtraCostYuan: Double?,
@@ -34,6 +36,8 @@ data class OrderRemarkAnalysis(
         appendLine("车辆尺寸/容积：${vehicleLengthM?.let { "${it}米" } ?: "未知"} / ${vehicleVolumeM3?.let { "${it}方" } ?: "未知"}")
         appendLine("货物：${cargoName ?: "未知"}")
         appendLine("重量/体积/长度：${cargoWeightKg?.let { "${it}kg" } ?: "未知"} / ${cargoVolumeM3?.let { "${it}方" } ?: "未知"} / ${cargoLengthM?.let { "${it}米" } ?: "未知"}")
+        appendLine("用户出价/运费：${freightYuan?.let { "¥${it}" } ?: "未知，需核对"}")
+        appendLine("多赚奖励：${extraRewardYuan?.let { "¥${it}" } ?: "未知，需核对"}")
         appendLine("装货点/卸货点：${pickupCount?.toString() ?: "未知"} / ${deliveryCount?.toString() ?: "未知"}")
         appendLine("司机额外成本：${driverExtraCostYuan?.let { "¥${it}" } ?: "未知，不能按0计算"}")
         appendLine("额外费用项目：${extraCostItems.ifEmpty { listOf("未提取/未知") }.joinToString("；")}")
@@ -80,6 +84,8 @@ data class OrderRemarkAnalysis(
                 cargoWeightKg = number("cargo_weight_kg"),
                 cargoVolumeM3 = number("cargo_volume_m3"),
                 cargoLengthM = number("cargo_length_m"),
+                freightYuan = number("freight_yuan"),
+                extraRewardYuan = number("extra_reward_yuan"),
                 pickupCount = integer("pickup_count"),
                 deliveryCount = integer("delivery_count"),
                 driverExtraCostYuan = number("driver_extra_cost_yuan"),
