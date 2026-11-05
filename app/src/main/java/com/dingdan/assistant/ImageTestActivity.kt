@@ -51,10 +51,14 @@ class ImageTestActivity : ComponentActivity() {
     private lateinit var auto: Button
     private lateinit var beginCrop: Button
     private lateinit var runCrop: Button
+    private lateinit var importModel: Button
     private var busy = false
 
     private val picker = registerForActivityResult(ActivityResultContracts.GetContent()) { uri: Uri? ->
         if (uri != null) load(uri)
+    }
+    private val modelPicker = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri: Uri? ->
+        if (uri != null) installModel(uri)
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -112,8 +116,14 @@ class ImageTestActivity : ComponentActivity() {
             }
         }
         body.addView(runCrop)
-        body.addView(makeLabel("3. 自动识别整张图片", 17f, true))
-        auto = button("整图自动分割并识别", 0xFF246B8E.toInt()) {
+        body.addView(makeLabel("3. YOLO 模型", 17f, true))
+        body.addView(makeLabel("模型仓库目前为私有仓库。请先从 GitHub 私有 Release 下载 ONNX 文件，再导入本机；不需要公开订单图片或仓库。", 12f))
+        importModel = button("导入 YOLO ONNX 模型文件", 0xFF426B55.toInt()) {
+            if (!busy) modelPicker.launch(arrayOf("application/octet-stream", "application/onnx", "*/*"))
+        }
+        body.addView(importModel)
+        body.addView(makeLabel("4. 自动识别整张图片", 17f, true))
+        auto = button("整图 YOLO 自动检测并识别", 0xFF246B8E.toInt()) {
             val image = source
             if (image == null) status.text = "请先选择图片" else if (!busy) autoSegment(image)
         }
@@ -146,6 +156,32 @@ class ImageTestActivity : ComponentActivity() {
                 output.text = "图片载入成功：" + bmp.width + " × " + bmp.height + "\n请选择自动分割或手动框选识别。"
                 status.text = "图片载入成功"
             } catch (e: Exception) { status.text = "图片读取失败：" + e.localizedMessage }
+        }
+    }
+
+    private fun installModel(uri: Uri) {
+        status.text = "正在导入 ONNX 模型…"
+        scope.launch {
+            try {
+                withContext(Dispatchers.IO) {
+                    val dir = File(filesDir, "models")
+                    check(dir.mkdirs() || dir.isDirectory) { "无法创建模型目录" }
+                    val target = File(dir, "dingdan_yolo11n.onnx")
+                    val temp = File(dir, "dingdan_yolo11n.onnx.tmp")
+                    contentResolver.openInputStream(uri)?.use { input ->
+                        temp.outputStream().use { output -> input.copyTo(output) }
+                    } ?: throw IllegalStateException("无法读取所选模型文件")
+                    check(temp.length() > 1024) { "文件太小，不是有效的 ONNX 模型" }
+                    if (!temp.renameTo(target)) {
+                        temp.copyTo(target, overwrite = true)
+                        temp.delete()
+                    }
+                }
+                status.text = "YOLO 模型导入成功，可以开始图片检测"
+                output.text = "模型已安装到本机私有目录。首次推理会初始化 ONNX Runtime。"
+            } catch (e: Exception) {
+                status.text = "模型导入失败：" + e.localizedMessage
+            }
         }
     }
 
@@ -296,7 +332,7 @@ class ImageTestActivity : ComponentActivity() {
     }
     private fun setBusy(value: Boolean) {
         busy = value
-        pick.isEnabled = !value; auto.isEnabled = !value
+        pick.isEnabled = !value; auto.isEnabled = !value; importModel.isEnabled = !value
         beginCrop.isEnabled = !value; runCrop.isEnabled = !value
     }
     override fun onDestroy() {
