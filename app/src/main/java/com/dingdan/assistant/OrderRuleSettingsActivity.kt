@@ -49,10 +49,14 @@ class OrderRuleSettingsActivity : ComponentActivity() {
         val deliveryMode = spinner(listOf("必须等于指定数量", "最多不超过指定数量", "不限制"), config.deliveryMode.ordinal)
         val deliveryLimit = field("卸货点数量", config.deliveryLimit.toString(), false)
         root.addView(deliveryMode); root.addView(deliveryLimit)
-        root.addView(label("数量不符合或数量未知时"))
-        val countIssue = spinner(listOf("待确认（默认）", "忽略订单"),
-            if (config.countIssueAction == OrderRuleConfig.UnknownAction.IGNORE) 1 else 0)
-        root.addView(countIssue)
+        root.addView(label("装卸点数量明确不符合规则时"))
+        val mismatchAction = spinner(listOf("忽略订单（默认）", "待确认"),
+            if (config.mismatchCountAction == OrderRuleConfig.UnknownAction.PENDING) 1 else 0)
+        root.addView(mismatchAction)
+        root.addView(label("装卸点数量无法识别时"))
+        val unknownAction = spinner(listOf("待确认（默认）", "忽略订单"),
+            if (config.unknownCountAction == OrderRuleConfig.UnknownAction.IGNORE) 1 else 0)
+        root.addView(unknownAction)
         val maxExtra = field("司机额外成本上限（元，留空不限制）", config.maxDriverExtraCostYuan?.toString().orEmpty())
         root.addView(label("司机额外成本限制"))
         root.addView(maxExtra)
@@ -82,7 +86,9 @@ class OrderRuleSettingsActivity : ComponentActivity() {
                     pickupLimit = pickupLimit.text.toString().toIntOrNull()?.coerceAtLeast(1) ?: 1,
                     deliveryMode = OrderRuleConfig.CountMode.values()[deliveryMode.selectedItemPosition],
                     deliveryLimit = deliveryLimit.text.toString().toIntOrNull()?.coerceAtLeast(1) ?: 1,
-                    countIssueAction = if (countIssue.selectedItemPosition == 1)
+                    mismatchCountAction = if (mismatchAction.selectedItemPosition == 1)
+                        OrderRuleConfig.UnknownAction.PENDING else OrderRuleConfig.UnknownAction.IGNORE,
+                    unknownCountAction = if (unknownAction.selectedItemPosition == 1)
                         OrderRuleConfig.UnknownAction.IGNORE else OrderRuleConfig.UnknownAction.PENDING,
                     maxDriverExtraCostYuan = maxExtra.text.toString().toDoubleOrNull()?.takeIf { it >= 0.0 },
                     vehicleType = vehicleType.text.toString().trim(),
