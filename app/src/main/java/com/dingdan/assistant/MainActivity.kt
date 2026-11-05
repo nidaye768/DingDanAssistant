@@ -256,57 +256,75 @@ class MainActivity : ComponentActivity() {
 
     private fun captureAndRecognize() {
         val c = capture ?: run { status.text = "摄像头尚未就绪"; return }
-        status.text = "正在拍摄…"
+        status.text = "正在拍摄并进行 YOLO 订单分类…"
         val file = File(cacheDir, "capture_${System.currentTimeMillis()}.jpg")
         c.takePicture(ImageCapture.OutputFileOptions.Builder(file).build(), cameraExecutor,
             object : ImageCapture.OnImageSavedCallback {
                 override fun onImageSaved(result: ImageCapture.OutputFileResults) {
                     val bitmap = BitmapFactory.decodeFile(file.absolutePath)
                     if (bitmap == null) { runOnUiThread { status.text = "图片读取失败" }; return }
-                    val segmentation = OrderCardSegmenter.process(bitmap)
-                    val yolo = try { YoloOrderDetector.detect(this@MainActivity, bitmap) } catch (e: Exception) { null }
-                    scope.launch {
-                        status.text = "PP-OCRv6 主引擎识别中…"
-                        var ppDiagnostic = ""
-                        val ppText = try {
-                            withContext(Dispatchers.IO) { recognizeWithPaddle(bitmap).also { ppDiagnostic = it.second }.first }
-                        } catch (e: Exception) {
-                            ppDiagnostic = "PP-OCRv6 主引擎失败：" + (e.localizedMessage ?: e.javaClass.simpleName)
-                            ""
+                    val yolo = try { YoloOrderDetector.detect(this@MainActivity, bitmap) } catch (e: Exception) {
+                        runOnUiThread {
+                            output.text = "YOLO检测失败，已阻止 OCR/AI 审核，避免把不完整或未知订单送去审核。\n原因：${e.localizedMessage ?: e.javaClass.simpleName}"
+                            status.text = "YOLO不可用｜自动审核已暂停"
                         }
-                        status.text = "ML Kit 辅助校验中…"
-                        val mlKitText = try {
-                            val recognizer = TextRecognition.getClient(ChineseTextRecognizerOptions.Builder().build())
-                            try { recognizer.process(InputImage.fromBitmap(bitmap, 0)).awaitResult().text }
-                            finally { recognizer.close() }
-                        } catch (e: Exception) {
-                            "ML Kit 辅助校验失败：" + (e.localizedMessage ?: e.javaClass.simpleName)
-                        }
-                        val primaryText = ppText.ifBlank { mlKitText }
-                        val report = buildString {
-                            appendLine("模式：${if (mode == "fast") "极速" else "全自动"}")
-                            appendLine("OCR 主引擎：PP-OCRv6")
-                            appendLine(if (ppText.isNotBlank()) "主引擎结果（用于后续分析）：\n$ppText" else "主引擎不可用，临时回退 ML Kit；本次结果需谨慎使用。")
-                            appendLine("\nPP-OCRv6 运行信息：$ppDiagnostic")
-                            appendLine("\nML Kit 辅助校验结果：\n$mlKitText")
-                            appendLine()
-                            if (yolo != null) {
-                                appendLine("YOLO11n ONNX：本机推理 ${yolo.inferenceMs} ms｜检测框 ${yolo.detections.size} 个")
-                                yolo.detections.forEachIndexed { i, d ->
-                                    appendLine("YOLO框 ${i + 1}：${d.className}｜置信度 ${"%.1f".format(d.confidence * 100)}%")
-                                }
-                            } else appendLine("YOLO模型暂不可用：保留规则分割结果")
-                            appendLine("红色标题栏（规则回退）：${segmentation.headerBands.size} 条")
-                            appendLine("规则卡片：${segmentation.cards.size} 张｜${segmentation.reason}")
-                            segmentation.cards.forEachIndexed { i, card ->
-                                appendLine("卡片 ${i + 1}：${if (card.isPartialBottom) "底部部分卡片" else "已截取"}｜hash=${"%016x".format(card.perceptualHash)}")
+                        bitmap.recycle()
+                        return
+                    }
+                    val complete = yolo.detections.filter { it.classId == 0 }
+                    val partialCount = yolo.detections.count { it.classId == 1 }
+                    if (complete.isEmpty()) {
+                        runOnUiThread {
+                            output.text = buildString {
+                                appendLine("YOLO检测完成｜推理 ${yolo.inferenceMs} ms")
+                                appendLine("完整订单：0 张")
+                                appendLine("部分露出订单：$partialCount 张")
+                                appendLine("本次未发现完整订单，已跳过 OCR 和 AI 审核。")
                             }
-                            appendLine("\n说明：PP-OCRv6 是主识别结果；ML Kit 只用于对照，不覆盖主结果。若关键数字或地址存在冲突，后续字段提取应标记待确认。")
-                            appendLine("本Demo不自动抢单。")
+                            status.text = if (partialCount > 0) "仅检测到部分订单｜等待完整订单" else "未检测到订单｜未启动审核"
                         }
-                        output.text = report
-                        status.text = if (ppText.isNotBlank()) "PP-OCRv6 主识别完成，ML Kit 辅助校验完成" else "PP-OCRv6失败，已回退ML Kit（需人工确认）"
-                        if (primaryText.isNotBlank()) requestVision(bitmap, primaryText)
+                        bitmap.recycle()
+                        return
+                    }
+                    scope.launch {
+                        val report = StringBuilder()
+                        report.appendLine("YOLO订单筛选：完整订单 ${complete.size} 张｜部分露出订单 $partialCount 张")
+                        report.appendLine("YOLO推理耗时：${yolo.inferenceMs} ms")
+                        complete.forEachIndexed { index, detection ->
+                            val orderBitmap = YoloOrderDetector.crop(bitmap, detection)
+                            report.appendLine("\n========== 完整订单 ${index + 1} ==========")
+                            report.appendLine("YOLO置信度：${"%.1f".format(detection.confidence * 100)}%")
+                            status.text = "完整订单 ${index + 1}/${complete.size}：PP-OCRv6识别中…"
+                            var ppDiagnostic = ""
+                            val ppText = try {
+                                withContext(Dispatchers.IO) {
+                                    recognizeWithPaddle(orderBitmap).also { ppDiagnostic = it.second }.first
+                                }
+                            } catch (e: Exception) {
+                                ppDiagnostic = "PP-OCRv6失败：" + (e.localizedMessage ?: e.javaClass.simpleName)
+                                ""
+                            }
+                            status.text = "完整订单 ${index + 1}/${complete.size}：ML Kit辅助校验中…"
+                            val mlKitText = try {
+                                val recognizer = TextRecognition.getClient(ChineseTextRecognizerOptions.Builder().build())
+                                try { recognizer.process(InputImage.fromBitmap(orderBitmap, 0)).awaitResult().text }
+                                finally { recognizer.close() }
+                            } catch (e: Exception) {
+                                "ML Kit辅助校验失败：" + (e.localizedMessage ?: e.javaClass.simpleName)
+                            }
+                            val primaryText = ppText.ifBlank { mlKitText }
+                            report.appendLine("PP-OCRv6主引擎：\n" + if (ppText.isBlank()) "无有效文本" else ppText)
+                            report.appendLine("PP-OCRv6运行信息：$ppDiagnostic")
+                            report.appendLine("ML Kit辅助校验：\n" + mlKitText)
+                            if (primaryText.isNotBlank()) {
+                                status.text = "完整订单 ${index + 1}/${complete.size}：提交 AI 审核…"
+                                requestVision(orderBitmap, primaryText)
+                                report.appendLine("已提交 AI 备注解析（只针对 YOLO class 0 完整订单）")
+                            } else report.appendLine("OCR为空：跳过AI调用")
+                            output.text = report.toString()
+                        }
+                        status.text = "完整订单识别完成：${complete.size} 张｜部分订单已跳过"
+                        bitmap.recycle()
                     }
                 }
                 override fun onError(e: ImageCaptureException) {
