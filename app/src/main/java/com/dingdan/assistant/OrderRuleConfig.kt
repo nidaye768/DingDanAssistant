@@ -35,7 +35,7 @@ data class OrderRuleConfig(
             pickupLimit = p.getInt("rule_pickup_limit", 1).coerceAtLeast(1),
             deliveryMode = runCatching { CountMode.valueOf(p.getString("rule_delivery_mode", "EXACT")!!) }.getOrDefault(CountMode.EXACT),
             deliveryLimit = p.getInt("rule_delivery_limit", 1).coerceAtLeast(1),
-            unknownCountAction = runCatching { UnknownAction.valueOf(p.getString("rule_count_issue", "PENDING")!!) }.getOrDefault(UnknownAction.PENDING),
+            countIssueAction = runCatching { UnknownAction.valueOf(p.getString("rule_count_issue", "PENDING")!!) }.getOrDefault(UnknownAction.PENDING),
             maxDriverExtraCostYuan = p.getString("rule_max_extra", null)?.toDoubleOrNull()?.takeIf { it >= 0.0 },
             vehicleType = p.getString("vehicle_type", "") ?: "",
             vehicleLengthM = p.getString("vehicle_length", null)?.toDoubleOrNull()?.takeIf { it > 0.0 },
@@ -50,7 +50,7 @@ data class OrderRuleConfig(
                 .putInt("rule_pickup_limit", config.pickupLimit)
                 .putString("rule_delivery_mode", config.deliveryMode.name)
                 .putInt("rule_delivery_limit", config.deliveryLimit)
-                .putString("rule_unknown_count", config.unknownCountAction.name)
+                .putString("rule_count_issue", config.countIssueAction.name)
                 .putString("rule_max_extra", config.maxDriverExtraCostYuan?.toString().orEmpty())
                 .putString("vehicle_type", config.vehicleType)
                 .putString("vehicle_length", config.vehicleLengthM?.toString().orEmpty())
