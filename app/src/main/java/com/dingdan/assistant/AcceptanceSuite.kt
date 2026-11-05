@@ -65,6 +65,35 @@ object AcceptanceSuite {
         check("备注关键要求未确认", unresolvedRemark.verdict == OrderDecisionEngine.Verdict.PENDING,
             "备注存在未确认的关键要求或风险时输出待确认")
 
+
+        val exactThreshold = OrderDecisionEngine.evaluate(facts(floor = 7.0))
+        check("单价刚好达到门槛", exactThreshold.verdict == OrderDecisionEngine.Verdict.RECOMMEND,
+            "净单价等于门槛时允许推荐")
+
+        val unknownDelivery = OrderDecisionEngine.evaluate(facts(deliveries = null))
+        check("卸货点未知待确认", unknownDelivery.verdict == OrderDecisionEngine.Verdict.PENDING,
+            "卸货点数量未知时不得推荐")
+
+        val multiDelivery = OrderDecisionEngine.evaluate(facts(deliveries = 2))
+        check("多卸货点过滤", multiDelivery.verdict == OrderDecisionEngine.Verdict.IGNORE,
+            "明确存在多个卸货点时按一装一卸策略过滤")
+
+        val invalidFreight = OrderDecisionEngine.evaluate(facts(freight = 0.0))
+        check("运费为零不推荐", invalidFreight.verdict == OrderDecisionEngine.Verdict.PENDING,
+            "运费为零或无效时不得计算并推荐")
+
+        val invalidDistance = OrderDecisionEngine.evaluate(facts(km = -1.0))
+        check("道路里程无效不推荐", invalidDistance.verdict == OrderDecisionEngine.Verdict.PENDING,
+            "道路里程为负数或无效时不得计算并推荐")
+
+        val negativeExtra = OrderDecisionEngine.evaluate(facts(extraCost = -1.0))
+        check("额外成本负数待确认", negativeExtra.verdict == OrderDecisionEngine.Verdict.PENDING,
+            "司机额外成本不能为负数")
+
+        val zeroNet = OrderDecisionEngine.evaluate(facts(extraCost = 240.0))
+        check("净运费为零不推荐", zeroNet.verdict == OrderDecisionEngine.Verdict.IGNORE,
+            "额外成本抵消全部运费时忽略订单")
+
         val same = 0x123456789ABCDEFL
         check("感知哈希完全相同", OrderCardSegmenter.hammingDistance(same, same) == 0,
             "相同哈希距离为 0")
