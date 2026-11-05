@@ -35,6 +35,8 @@ dependencies {
 
     implementation("com.google.mlkit:text-recognition-chinese:16.0.1")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
-    implementation("com.microsoft.onnxruntime:onnxruntime-android:1.20.0")
+    implementation("com.microsoft.onnxruntime:onnxruntime-android:1.21.1")
+    implementation("com.quickbirdstudios:opencv:4.5.3")
+    implementation(files("libs/ppocr-sdk-release.aar"))
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
 }
