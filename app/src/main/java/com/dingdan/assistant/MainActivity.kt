@@ -16,6 +16,7 @@ import androidx.camera.view.PreviewView
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import com.dingdan.assistant.vision.OrderCardSegmenter
+import com.dingdan.assistant.vision.YoloOrderDetector
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.text.TextRecognition
 import com.google.mlkit.vision.text.chinese.ChineseTextRecognizerOptions
@@ -192,6 +193,7 @@ class MainActivity : ComponentActivity() {
                     val bitmap = BitmapFactory.decodeFile(file.absolutePath)
                     if (bitmap == null) { runOnUiThread { status.text = "图片读取失败" }; return }
                     val segmentation = OrderCardSegmenter.process(bitmap)
+                    val yolo = try { YoloOrderDetector.detect(this@MainActivity, bitmap) } catch (e: Exception) { null }
                     val recognizer = TextRecognition.getClient(ChineseTextRecognizerOptions.Builder().build())
                     recognizer.process(InputImage.fromBitmap(bitmap, 0))
                         .addOnSuccessListener { ocr ->
@@ -200,8 +202,16 @@ class MainActivity : ComponentActivity() {
                                 appendLine("OCR 原文：")
                                 appendLine(ocr.text)
                                 appendLine()
-                                appendLine("红色标题栏：${segmentation.headerBands.size} 条")
-                                appendLine("卡片：${segmentation.cards.size} 张｜${segmentation.reason}")
+                                if (yolo != null) {
+                                    appendLine("YOLO11n ONNX：本机推理 ${yolo.inferenceMs} ms｜检测框 ${yolo.detections.size} 个")
+                                    yolo.detections.forEachIndexed { i, d ->
+                                        appendLine("YOLO框 ${i + 1}：${d.className}｜置信度 ${"%.1f".format(d.confidence * 100)}%")
+                                    }
+                                } else {
+                                    appendLine("YOLO模型暂不可用：将保留规则分割结果，首次下载模型需联网")
+                                }
+                                appendLine("红色标题栏（规则回退）：${segmentation.headerBands.size} 条")
+                                appendLine("规则卡片：${segmentation.cards.size} 张｜${segmentation.reason}")
                                 segmentation.cards.forEachIndexed { i, card ->
                                     appendLine("卡片 ${i + 1}：${if (card.isPartialBottom) "底部部分卡片" else "已截取"}｜hash=${"%016x".format(card.perceptualHash)}")
                                 }
