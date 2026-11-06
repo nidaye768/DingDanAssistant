@@ -680,17 +680,6 @@ class MainActivity : ComponentActivity() {
         addOnFailureListener { if (c.isActive) c.resumeWithException(it) }
     }
 
-    override fun onDestroy() {
-        super.onDestroy()
-        scope.cancel()
-        synchronized(gapRecLock) {
-            runCatching { gapRecManager?.release() }
-            gapRecManager = null
-            gapRecEngine = null
-        }
-        cameraExecutor.shutdown()
-    }
-
     private fun runSelfTests() {
         val results = AcceptanceSuite.run()
         val passed = results.count { it.passed }
@@ -869,6 +858,11 @@ $ocr
     override fun onDestroy() {
         super.onDestroy()
         scope.cancel()
+        synchronized(gapRecLock) {
+            runCatching { gapRecManager?.release() }
+            gapRecManager = null
+            gapRecEngine = null
+        }
         // release() 是 suspend API；Activity 销毁时转到独立 IO 协程释放，避免非法同步调用。
         val engineToRelease = paddleOcr
         paddleOcr = null
