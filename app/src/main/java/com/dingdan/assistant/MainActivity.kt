@@ -18,6 +18,11 @@ import androidx.core.content.ContextCompat
 import com.dingdan.assistant.vision.OrderCardSegmenter
 import com.dingdan.assistant.vision.YoloOrderDetector
 import com.paddle.ocr.PaddleOCR
+import com.paddle.ocr.EngineConfig
+import com.paddle.ocr.engine.ORTSessionManager
+import com.paddle.ocr.engine.RecognitionEngine
+import com.paddle.ocr.model.ModelConfig
+import com.paddle.ocr.util.BitmapUtils
 import com.paddle.ocr.util.OpenCVUtils
 import com.google.android.gms.tasks.Task
 import kotlin.coroutines.resume
@@ -49,6 +54,9 @@ class MainActivity : ComponentActivity() {
     private lateinit var cameraExecutor: ExecutorService
     private var capture: ImageCapture? = null
     @Volatile private var paddleOcr: PaddleOCR? = null
+    @Volatile private var gapRecManager: ORTSessionManager? = null
+    @Volatile private var gapRecEngine: RecognitionEngine? = null
+    private val gapRecLock = Any()
     private var mode = "auto"
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private val client = OkHttpClient.Builder().connectTimeout(20, TimeUnit.SECONDS)
@@ -513,20 +521,157 @@ class MainActivity : ComponentActivity() {
         return JSONObject().put("recognized_text", text.text).put("blocks", blocks).toString()
     }
 
+    private data class PpDetectedBox(
+        val text: String, val confidence: Float,
+        val left: Float, val top: Float, val right: Float, val bottom: Float
+    ) {
+        val height: Float get() = (bottom - top).coerceAtLeast(1f)
+        val centerY: Float get() = (top + bottom) / 2f
+    }
+
+    private fun getGapRecognitionEngine(): RecognitionEngine {
+        gapRecEngine?.let { return it }
+        synchronized(gapRecLock) {
+            gapRecEngine?.let { return it }
+            System.loadLibrary("opencv_java4")
+            check(OpenCVUtils.init(this)) { "Rec-only OpenCV 初始化失败" }
+            val manager = ORTSessionManager(this, EngineConfig())
+            try {
+                // SDK 同时加载 det/rec session；此处只调用 RecognitionEngine，不执行 Det 推理。
+                manager.loadModels("models/det/inference.onnx", "models/rec/inference.onnx")
+                val config = ModelConfig.parse(this, "models/rec/inference.yml")
+                val engine = RecognitionEngine(manager, config.characterList)
+                gapRecManager = manager
+                gapRecEngine = engine
+                return engine
+            } catch (e: Exception) {
+                runCatching { manager.release() }
+                throw e
+            }
+        }
+    }
+
     private suspend fun recognizeWithPaddle(bitmap: Bitmap): Pair<String, String> {
-        // PaddleOCR.create、recognize 均为 suspend API；调用方在 Dispatchers.IO 中执行。
+        // 正常路径先执行 DET + REC；仅在“用户出价”与右侧同一行文字框之间
+        // 出现异常大空隙时，才启动局部 Rec-only 补检。
         val engine = paddleOcr ?: run {
             System.loadLibrary("opencv_java4")
             check(OpenCVUtils.init(this)) { "OpenCVUtils 初始化失败" }
             PaddleOCR.create(this).also { paddleOcr = it }
         }
         val result = engine.recognize(bitmap)
-        val recognizedText = result.results.joinToString("\n") { it.text }.trim()
-        val lineEvidence = result.results.joinToString(" || ") { line ->
+        val baseText = result.results.joinToString("\n") { it.text }.trim()
+        val baseEvidence = result.results.joinToString(" || ") { line ->
             val points = line.box.points.joinToString(" ") { "(${it.x.toInt()},${it.y.toInt()})" }
             "text=${line.text}; confidence=${"%.3f".format(java.util.Locale.US, line.confidence)}; points=$points"
         }
-        val details = "模型已加载｜检测 ${result.detectionTimeMs}ms｜识别 ${result.recognitionTimeMs}ms｜总计 ${result.totalTimeMs}ms｜文本行 ${result.lineCount}｜文字行证据：$lineEvidence"
+        val boxes = result.results.mapNotNull { line ->
+            val points = line.box.points
+            if (points.size < 2) return@mapNotNull null
+            PpDetectedBox(
+                line.text, line.confidence,
+                points.minOf { it.x }, points.minOf { it.y },
+                points.maxOf { it.x }, points.maxOf { it.y }
+            )
+        }
+        val gapEvents = JSONArray()
+        val recoveredEvidence = mutableListOf<String>()
+        val recoveredTexts = mutableListOf<String>()
+        var attemptedGaps = 0
+        val labels = boxes.filter { it.text.contains("用户出价") }.take(2)
+
+        for (label in labels) {
+            val sameRowRight = boxes.filter { candidate ->
+                candidate !== label && candidate.left >= label.right &&
+                    kotlin.math.abs(candidate.centerY - label.centerY) <=
+                    maxOf(label.height, candidate.height) * 0.95f
+            }
+            val rightBox = sameRowRight.firstOrNull { it.text.contains("已全额") }
+                ?: sameRowRight.minByOrNull { it.left }
+            if (rightBox == null) {
+                gapEvents.put(JSONObject().put("status", "SKIPPED_NO_RIGHT_ANCHOR")
+                    .put("label_text", label.text))
+                continue
+            }
+            val gapWidth = rightBox.left - label.right
+            val rowHeight = maxOf(label.height, rightBox.height)
+            if (gapWidth < rowHeight * 1.20f || gapWidth > rowHeight * 12.0f) {
+                gapEvents.put(JSONObject().put("status", "SKIPPED_GAP_NOT_ABNORMAL")
+                    .put("gap_width_px", gapWidth).put("row_height_px", rowHeight)
+                    .put("left_text", label.text).put("right_text", rightBox.text))
+                continue
+            }
+            if (attemptedGaps >= 2) break
+            attemptedGaps++
+
+            val padX = (rowHeight * 0.18f).toInt().coerceAtLeast(2)
+            val padY = (rowHeight * 0.55f).toInt().coerceAtLeast(3)
+            val cropLeft = (label.right.toInt() - padX).coerceIn(0, bitmap.width - 1)
+            val cropRight = (rightBox.left.toInt() + padX).coerceIn(cropLeft + 1, bitmap.width)
+            val cropTop = (minOf(label.top, rightBox.top).toInt() - padY).coerceIn(0, bitmap.height - 1)
+            val cropBottom = (maxOf(label.bottom, rightBox.bottom).toInt() + padY)
+                .coerceIn(cropTop + 1, bitmap.height)
+            val crop = Bitmap.createBitmap(bitmap, cropLeft, cropTop,
+                cropRight - cropLeft, cropBottom - cropTop)
+            val gapRecord = JSONObject()
+                .put("status", "REC_ONLY_STARTED")
+                .put("gap_width_px", gapWidth)
+                .put("row_height_px", rowHeight)
+                .put("crop_rect", JSONObject().put("left", cropLeft).put("top", cropTop)
+                    .put("right", cropRight).put("bottom", cropBottom))
+                .put("left_anchor_text", label.text).put("right_anchor_text", rightBox.text)
+            try {
+                val recEngine = getGapRecognitionEngine()
+                for (factor in listOf(2, 3)) {
+                    val scaled = Bitmap.createScaledBitmap(crop, crop.width * factor,
+                        crop.height * factor, true)
+                    val mat = BitmapUtils.bitmapToBGRMat(scaled)
+                    val recStarted = android.os.SystemClock.elapsedRealtime()
+                    try {
+                        val rec = recEngine.recognize(listOf(mat))
+                        val decoded = rec.texts.firstOrNull()
+                        val text = decoded?.first.orEmpty().trim()
+                        val confidence = decoded?.second ?: 0.0
+                        gapRecord.put("scale_${factor}x", JSONObject()
+                            .put("recognized_text", text).put("confidence", confidence)
+                            .put("rec_input_shape", JSONArray(rec.inputShape))
+                            .put("preprocess_ms", rec.preprocessMs)
+                            .put("inference_ms", rec.inferenceMs)
+                            .put("postprocess_ms", rec.postprocessMs)
+                            .put("total_ms", rec.timeMs)
+                            .put("wall_time_ms", android.os.SystemClock.elapsedRealtime() - recStarted))
+                        if (text.isNotBlank()) {
+                            recoveredTexts += text
+                            // 合成回原图坐标的证据框，使现有空间关联器可验证金额与“用户出价”的关系。
+                            val synthetic = "text=$text; confidence=${"%.3f".format(java.util.Locale.US, confidence)}; " +
+                                "points=(${cropLeft},${cropTop}) (${cropRight},${cropBottom})"
+                            recoveredEvidence += synthetic
+                        }
+                    } finally {
+                        mat.release()
+                        if (!scaled.isRecycled && scaled !== crop) scaled.recycle()
+                    }
+                }
+                if (recoveredEvidence.isNotEmpty()) gapRecord.put("status", "REC_ONLY_EVIDENCE_FOUND")
+                else gapRecord.put("status", "REC_ONLY_NO_TEXT")
+            } catch (e: Exception) {
+                gapRecord.put("status", "REC_ONLY_FAILED")
+                    .put("error", e.localizedMessage ?: e.javaClass.simpleName)
+            } finally {
+                if (!crop.isRecycled) crop.recycle()
+            }
+            gapEvents.put(gapRecord)
+        }
+
+        val combinedEvidence = (listOf(baseEvidence).filter { it.isNotBlank() } + recoveredEvidence)
+            .joinToString(" || ")
+        val recognizedText = (listOf(baseText) + recoveredTexts).filter { it.isNotBlank() }
+            .distinct().joinToString("\n")
+        val recoveryJson = JSONObject()
+            .put("strategy", "same_row_large_gap_then_rec_only_2x_3x")
+            .put("attempted_gap_count", attemptedGaps)
+            .put("events", gapEvents)
+        val details = "模型已加载｜检测 ${result.detectionTimeMs}ms｜识别 ${result.recognitionTimeMs}ms｜总计 ${result.totalTimeMs}ms｜文本行 ${result.lineCount}｜文字行证据：$combinedEvidence｜DET漏框补检：$recoveryJson"
         return recognizedText to details
     }
 
@@ -713,6 +858,11 @@ $ocr
     override fun onDestroy() {
         super.onDestroy()
         scope.cancel()
+        synchronized(gapRecLock) {
+            runCatching { gapRecManager?.release() }
+            gapRecManager = null
+            gapRecEngine = null
+        }
         // release() 是 suspend API；Activity 销毁时转到独立 IO 协程释放，避免非法同步调用。
         val engineToRelease = paddleOcr
         paddleOcr = null
