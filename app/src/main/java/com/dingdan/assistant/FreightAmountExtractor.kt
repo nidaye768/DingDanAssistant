@@ -103,6 +103,21 @@ object FreightAmountExtractor {
         val crossScaleConsensus = if (twoX.isNotEmpty() && gray.isNotEmpty() &&
             transformedValues.size == 1) transformed.first().amount else null
 
+        // Different image variants from the same OCR engine are not independent votes.
+        // Count each engine only once per amount. This handles cases such as:
+        // ML Kit/original=61.6, PP-OCR/2x=61.6, ML Kit/2x=1.6.
+        // The matching amount has support from two engines; the dissent is only one
+        // transformed result from an engine that already supplied a direct original result.
+        val engineSupport = valid.groupBy { amountKey(it.amount) }
+            .mapValues { (_, rows) -> rows.map { it.source }.distinct() }
+        val corroboratedAmounts = engineSupport.filterValues { it.size >= 2 }
+        val crossEngineConsensus = if (corroboratedAmounts.size == 1) {
+            valid.firstOrNull { amountKey(it.amount) == corroboratedAmounts.keys.first() }?.amount
+        } else null
+        val supportDetails = engineSupport.entries.joinToString("；") { (amount, sources) ->
+            "${amount / 100.0}元由[${sources.joinToString(",")}]支持"
+        }
+
         return when {
             originalConsensus != null ->
                 Result(originalConsensus, "CONFIRMED_ORIGINAL", valid,
@@ -113,6 +128,12 @@ object FreightAmountExtractor {
             enhancedConsensus != null ->
                 Result(enhancedConsensus, "CONFIRMED_GRAY_2X", valid,
                     "$allDetails；灰度增强2倍图双引擎一致，采用灰度增强结果")
+            crossEngineConsensus != null ->
+                Result(crossEngineConsensus, "CONFIRMED_CROSS_ENGINE", valid,
+                    "$allDetails；跨尺度独立引擎交叉支持：$supportDetails；少数候选不作为一票否决")
+            corroboratedAmounts.size > 1 ->
+                Result(null, "CONFLICT", valid,
+                    "$allDetails；多个金额均获得至少两个独立引擎支持：$supportDetails；金额待确认")
             crossScaleConsensus != null ->
                 Result(crossScaleConsensus, "CONFIRMED_CROSS_SCALE", valid,
                     "$allDetails；普通2倍图与灰度增强2倍图候选一致，跨尺度确认")
